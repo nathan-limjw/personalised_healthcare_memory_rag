@@ -12,3 +12,6 @@ tiktoken>=0.5.0
 langgraph-checkpoint-sqlite
 langchain-text-splitters
 pymupdf 
+pandas
+openpyxl
+psutil

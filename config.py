@@ -10,6 +10,14 @@ OLLAMA_MODEL = "llama3.1:8b"
 EMBEDDING_MODEL = "nomic-embed-text"  # pull via: ollama pull nomic-embed-text
 
 # ════════════════════════════════
+# EVALUATION FILES
+# ════════════════════════════════
+
+EXCEL_PATH = "eval/more_test_cases.xlsx"
+PERSISTENT_CSV = "eval/evaluation_results.csv"
+
+
+# ════════════════════════════════
 # STORAGE PATHS
 # ════════════════════════════════
 
