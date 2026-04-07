@@ -13,8 +13,8 @@ EMBEDDING_MODEL = "nomic-embed-text"  # pull via: ollama pull nomic-embed-text
 # EVALUATION FILES
 # ════════════════════════════════
 
-EXCEL_PATH = "more_test_cases.xlsx"
-PERSISTENT_CSV = "evaluation_results.csv"
+EXCEL_PATH = "eval/more_test_cases.xlsx"
+PERSISTENT_CSV = "eval/evaluation_results.csv"
 
 
 # ════════════════════════════════
