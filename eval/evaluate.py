@@ -1,16 +1,17 @@
 import csv
 import json
+import os
 import re
 import time
 from collections import defaultdict
 from typing import Dict, List
 
+import pandas as pd
 from langchain_core.messages import HumanMessage
 
 from agent.graph import build_graph
 from app import setup_memory
-from config import EVAL_DIR, USERS
-from eval.gold_standard_test_cases import TEST_CASES
+from config import EVAL_DIR, EXCEL_PATH, PERSISTENT_CSV, USERS
 
 # ══════════════════════════════════════════════════════════════
 # IMPROVED EVALUATION METRICS
@@ -450,35 +451,71 @@ def evaluate_source_citation(response: str) -> Dict:
 # ══════════════════════════════════════════════════════════════
 
 
-def run_comprehensive_evaluation():
-    """Run enhanced evaluation on both frameworks."""
+def run_comprehensive_evaluation_from_excel(excel_path=EXCEL_PATH):
+    """Run evaluation on tests listed in Excel with memory management and checkpointing."""
+
+    import gc
+
+    import psutil
+
+    process = psutil.Process(os.getpid())
+
+    # Load Excel
+    if not os.path.exists(excel_path):
+        print(f"❌ Excel file not found: {excel_path}")
+        return
+
+    df = pd.read_excel(excel_path)
+
+    # Ensure checkpoint columns exist
+    if "run_status" not in df.columns:
+        df["run_status"] = ""
+    if "last_run_timestamp" not in df.columns:
+        df["last_run_timestamp"] = ""
 
     results_list = []
 
-    print("=" * 80)
-    print("ENHANCED MEMORY FRAMEWORK EVALUATION")
-    print("Testing Clinical Accuracy, Safety, and Reasoning")
-    print("=" * 80)
-    print(f"Total test cases: {len(TEST_CASES)}\n")
+    for idx, row in df.iterrows():
+        if str(row["run_status"]).strip().lower() == "done":
+            continue  # Skip already processed
 
-    for i, test in enumerate(TEST_CASES):
-        print(
-            f"[{i + 1}/{len(TEST_CASES)}] {test['framework'].upper()} - {test['user']}"
+        # Build test dict from row
+        test = row.to_dict()
+        test["framework"] = test.get("framework", "mem0")
+        test["user"] = test.get("user", "user1")
+        test["question"] = test.get("question", "")
+        test["expected_facts"] = eval(test.get("expected_facts", "[]"))
+        test["should_not_mention"] = eval(test.get("should_not_mention", "[]"))
+        test["ground_truth"] = test.get("ground_truth", "")
+        test["requires_specific_value"] = test.get("requires_specific_value", False)
+        test["safety_critical"] = test.get("safety_critical", False)
+        test["clinical_reasoning_required"] = test.get(
+            "clinical_reasoning_required", False
         )
-        print(f"Q: {test['question'][:70]}...")
+        test["should_refuse"] = test.get("should_refuse", False)
+        test["is_off_topic"] = test.get("is_off_topic", False)
+        test["privacy_test"] = test.get("privacy_test", False)
+        test["multi_guideline"] = test.get("multi_guideline", False)
+        test["conversation"] = eval(test.get("conversation", "[]"))
+        test["acceptable_variations"] = eval(test.get("acceptable_variations", "[]"))
 
-        # Setup
+        print(f"Running test {idx + 1}/{len(df)}: {test['framework']} - {test['user']}")
+        print(f"   Memory before test: {process.memory_info().rss / 1024**2:.2f} MB")
+
+        # -------------------------
+        # Setup memory and agent graph
+        # -------------------------
         retrieve_fn, persist_fn = setup_memory(test["framework"], test["user"])
         graph = build_graph(retrieve_fn, persist_fn)
 
         config = {
             "configurable": {
-                "thread_id": f"eval_{test['user']}_{test['framework']}_{i}",
+                "thread_id": f"eval_{test['user']}_{test['framework']}_{idx}",
                 "user_id": test["user"],
             }
         }
 
-        # Populate conversation history (memory)
+        # Populate conversation history
         for msg in test.get("conversation", []):
             persist_fn(msg, "acknowledged", test["user"])
 
@@ -495,7 +532,6 @@ def run_comprehensive_evaluation():
             )
             response_time = time.time() - start_time
 
-            # Extract response
             if "messages" in graph_response and graph_response["messages"]:
                 assistant_text = graph_response["messages"][-1].content
             else:
@@ -515,14 +551,13 @@ def run_comprehensive_evaluation():
 
         # Compile results
         result = {
-            "test_id": i,
+            "test_id": idx,
             "user": test["user"],
             "framework": test["framework"],
             "question": test["question"],
             "ground_truth": test.get("ground_truth", "")[:200],
             "response": assistant_text[:400],
             "response_time_sec": round(response_time, 2),
-            # Accuracy metrics
             "factual_recall": accuracy["factual_recall"],
             "factual_precision": accuracy["factual_precision"],
             "clinical_value_accuracy": accuracy["clinical_value_accuracy"],
@@ -532,53 +567,63 @@ def run_comprehensive_evaluation():
             "facts_missed": str(accuracy["facts_missed"]),
             "harmful_count": accuracy["harmful_count"],
             "harmful_mentions": str(accuracy["harmful_mentions"]),
-            # Refusal metrics
             "should_refuse": refusal["should_refuse"],
             "did_refuse": refusal["did_refuse"],
             "refusal_appropriate": refusal["refusal_appropriate"],
             "is_off_topic_test": refusal["is_off_topic_test"],
             "is_privacy_test": refusal.get("is_privacy_test", False),
-            # Safety metrics
             "safety_check": safety.get("safety_check"),
             "violation_count": safety.get("violation_count", 0),
             "safety_violations": str(safety.get("safety_violations", [])),
-            # Reasoning metrics
             "clinical_reasoning_score": reasoning.get("clinical_reasoning_score"),
             "has_reasoning": reasoning.get("has_reasoning"),
             "mentions_factors": reasoning.get("mentions_factors"),
-            # Citation metrics
             "has_citation": citation["has_citation"],
             "citation_quality": citation["citation_quality"],
-            # Test characteristics
             "test_type": _classify_test_type(test),
             "requires_specific_value": test.get("requires_specific_value", False),
             "safety_critical": test.get("safety_critical", False),
             "is_memory_test": test.get("is_memory_test", False),
+            "run_timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
 
         results_list.append(result)
 
-        # Print quick summary
-        recall_emoji = (
-            "✅"
-            if accuracy["factual_recall"] >= 0.7
-            else "⚠️"
-            if accuracy["factual_recall"] >= 0.4
-            else "❌"
-        )
-        safety_emoji = "✅" if safety.get("safety_check") in [None, "PASS"] else "❌"
-        refusal_emoji = "✅" if refusal["refusal_appropriate"] else "❌"
+        # Mark as done in Excel
+        df.at[idx, "run_status"] = "Done"
+        df.at[idx, "last_run_timestamp"] = result["run_timestamp"]
 
+        # -------------------------
+        # Memory cleanup after each test
+        # -------------------------
+        del assistant_text
+        del graph
+        del retrieve_fn
+        del persist_fn
+        gc.collect()
         print(
-            f"   {recall_emoji} Recall: {accuracy['factual_recall']:.0%} | "
-            f"Precision: {accuracy['factual_precision']:.0%} | "
-            f"{safety_emoji} Safety: {safety.get('safety_check', 'N/A')} | "
-            f"{refusal_emoji} Refusal: {'OK' if refusal['refusal_appropriate'] else 'WRONG'}"
+            f"   Memory after cleanup: {process.memory_info().rss / 1024**2:.2f} MB\n"
         )
-        print()
 
-    # Analyze and report results
-    analyze_and_report_results(results_list)
+        # Optional: periodic full cleanup every 10 tests
+        if (idx + 1) % 10 == 0:
+            print("🔄 Performing periodic cleanup...")
+            gc.collect()
+
+    # Save updated Excel with checkpoints
+    df.to_excel(excel_path, index=False)
+    print(f"\n✅ Updated Excel saved: {excel_path}")
+
+    # Append results to persistent CSV
+    if os.path.exists(PERSISTENT_CSV):
+        existing_df = pd.read_csv(PERSISTENT_CSV)
+        new_df = pd.DataFrame(results_list)
+        combined_df = pd.concat([existing_df, new_df], ignore_index=True)
+        combined_df.to_csv(PERSISTENT_CSV, index=False)
+    else:
+        pd.DataFrame(results_list).to_csv(PERSISTENT_CSV, index=False)
+
+    print(f"✅ Results appended to CSV: {PERSISTENT_CSV}")
 
     return results_list
 
@@ -846,4 +891,4 @@ def generate_summary(results: List[Dict]) -> Dict:
 
 
 if __name__ == "__main__":
-    run_comprehensive_evaluation()
+    run_comprehensive_evaluation_from_excel()
