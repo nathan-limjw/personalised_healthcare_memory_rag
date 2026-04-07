@@ -1,5 +1,6 @@
 # agent/graph.py
 import json
+import os
 import re
 import sqlite3
 from typing import Literal
@@ -16,7 +17,9 @@ from rag.vectorstore import load_index, retrieve
 # Load RAG index once
 rag_index, rag_texts, rag_sources = load_index()
 
-llm = ChatOllama(model=OLLAMA_MODEL, base_url=OLLAMA_BASE_URL, temperature=0.3)
+os.environ["OLLAMA_USE_GPU"] = "0"
+
+llm = ChatOllama(model=OLLAMA_MODEL, base_url=OLLAMA_BASE_URL, temperature=0.1)
 
 
 def format_memory_context(memories):
