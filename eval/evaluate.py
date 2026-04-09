@@ -1,7 +1,6 @@
 import gc
 import os
 import re
-import signal
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from typing import Dict, List
@@ -565,7 +564,7 @@ def run_comprehensive_evaluation_from_excel(excel_path=EXCEL_PATH):
             }
         }
 
-        signal.alarm(60)
+        # signal.alarm(60)
 
         try:
             # 🔥 STREAM to see where it stalls
@@ -582,39 +581,38 @@ def run_comprehensive_evaluation_from_excel(excel_path=EXCEL_PATH):
                 step_name = list(step.keys())[0]
                 print(f"      → Node executed: {step_name}")
 
-            graph_response = graph.invoke(
-                {
-                    "messages": [HumanMessage(content=test["question"])],
-                    "user_id": test["user"],
-                    "user_name": USERS.get(test["user"], {}).get("name", test["user"]),
-                },
-                config=config,
-            )
-
+            # Use ThreadPoolExecutor for timeout
             with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(graph_response)
-                graph_response = future.result(timeout=60)  # 60-second timeout
+                future = executor.submit(
+                    graph.invoke,
+                    {
+                        "messages": [HumanMessage(content=test["question"])],
+                        "user_id": test["user"],
+                        "user_name": USERS.get(test["user"], {}).get(
+                            "name", test["user"]
+                        ),
+                    },
+                    config=config,
+                )
+                try:
+                    graph_response = future.result(timeout=60)  # 60-second timeout
+                except TimeoutError:
+                    print("   ⏰ TIMEOUT during graph execution")
+                    graph_response = "TIMEOUT"
 
             response_time = time.time() - start_time
 
-            if "messages" in graph_response:
+            if isinstance(graph_response, dict) and "messages" in graph_response:
                 assistant_text = graph_response["messages"][-1].content
             else:
                 assistant_text = str(graph_response)
 
-        except TimeoutError:
-            print("   ⏰ TIMEOUT during graph execution")
-            assistant_text = "TIMEOUT"
-            response_time = 60
-
         except Exception as e:
-            signal.alarm(0)
             print(f"   ❌ ERROR: {e}")
             assistant_text = str(e)
             response_time = 0
 
         t3 = time.time()
-
         # ─────────────────────────────
         # 4. Evaluation
         # ─────────────────────────────
