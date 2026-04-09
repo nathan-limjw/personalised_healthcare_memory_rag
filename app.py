@@ -10,8 +10,12 @@ st.set_page_config(page_title="Healthcare Memory RAG", page_icon="🏥", layout=
 
 
 # ── MEMORY SETUP ───────────────────────────────────────────────────────────
-def setup_memory(framework_name, user_key=None):
+def setup_memory(framework_name, user_key=None, reset=False):
     """Initialise memory backend and return retrieve/persist functions."""
+
+    if reset:
+        if framework_name in st.session_state.memory_objects:
+            del st.session_state.memory_objects[framework_name]
 
     if framework_name == "mem0":
         from memory.mem0_memory import add_memory, get_mem0, search_memory
@@ -160,11 +164,16 @@ if (
     st.session_state.current_framework != fw_key
     or st.session_state.current_user != user_key
 ):
-    if fw_key in st.session_state.memory_objects:
-        del st.session_state.memory_objects[fw_key]
+    # Clear all old memory objects
+    st.session_state.memory_objects = {}
 
+    # Setup new memory for the selected framework and user
     retrieve_fn, persist_fn = setup_memory(fw_key, user_key)
+
+    # Rebuild the graph with fresh memory
     st.session_state.graph = build_graph(retrieve_fn, persist_fn)
+
+    # Update current framework/user
     st.session_state.current_framework = fw_key
     st.session_state.current_user = user_key
     st.session_state.messages = []
