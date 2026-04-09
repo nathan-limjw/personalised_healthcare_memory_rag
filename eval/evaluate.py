@@ -1,17 +1,17 @@
-import csv
-import json
+import gc
 import os
 import re
+import signal
 import time
-from collections import defaultdict
 from typing import Dict, List
 
 import pandas as pd
+import psutil
 from langchain_core.messages import HumanMessage
 
 from agent.graph import build_graph
 from app import setup_memory
-from config import EVAL_DIR, EXCEL_PATH, PERSISTENT_CSV, USERS
+from config import EXCEL_PATH, PERSISTENT_CSV, USERS
 
 # ══════════════════════════════════════════════════════════════
 # IMPROVED EVALUATION METRICS
@@ -446,6 +446,42 @@ def evaluate_source_citation(response: str) -> Dict:
     }
 
 
+def _classify_test_type(test: Dict) -> str:
+    """Classify test case type for reporting."""
+    if test.get("is_off_topic"):
+        return "off_topic_refusal"
+    elif test.get("privacy_test"):
+        return "privacy"
+    elif test.get("is_memory_test"):
+        return "memory"
+    elif test.get("safety_critical"):
+        return "safety_critical"
+    elif test.get("clinical_reasoning_required"):
+        return "clinical_reasoning"
+    elif test.get("requires_specific_value"):
+        return "specific_value"
+    elif test.get("multi_guideline"):
+        return "integration"
+    else:
+        return "factual"
+
+
+# ══════════════════════════════════════════════════════════════
+# TIMEOUT HANDLER
+# ══════════════════════════════════════════════════════════════
+
+
+class TimeoutException(Exception):
+    pass
+
+
+def timeout_handler(signum, frame):
+    raise TimeoutException()
+
+
+signal.signal(signal.SIGALRM, timeout_handler)
+
+
 # ══════════════════════════════════════════════════════════════
 # MAIN EVALUATION RUNNER
 # ══════════════════════════════════════════════════════════════
@@ -453,10 +489,6 @@ def evaluate_source_citation(response: str) -> Dict:
 
 def run_comprehensive_evaluation_from_excel(excel_path=EXCEL_PATH):
     """Run evaluation on tests listed in Excel with memory management and checkpointing."""
-
-    import gc
-
-    import psutil
 
     process = psutil.Process(os.getpid())
 
@@ -466,14 +498,13 @@ def run_comprehensive_evaluation_from_excel(excel_path=EXCEL_PATH):
         return
 
     df = pd.read_excel(excel_path)
+    results_list = []
 
     # Ensure checkpoint columns exist
     if "run_status" not in df.columns:
         df["run_status"] = ""
     if "last_run_timestamp" not in df.columns:
         df["last_run_timestamp"] = ""
-
-    results_list = []
 
     for idx, row in df.iterrows():
         if str(row["run_status"]).strip().lower() == "done":
@@ -502,12 +533,30 @@ def run_comprehensive_evaluation_from_excel(excel_path=EXCEL_PATH):
         print(f"Running test {idx + 1}/{len(df)}: {test['framework']} - {test['user']}")
         print(f"   Memory before test: {process.memory_info().rss / 1024**2:.2f} MB")
 
-        # -------------------------
-        # Setup memory and agent graph
-        # -------------------------
-        retrieve_fn, persist_fn = setup_memory(test["framework"], test["user"])
+        # ─────────────────────────────
+        # 1. Setup memory (RESET each test)
+        # ─────────────────────────────
+        t0 = time.time()
+
+        retrieve_fn, persist_fn = setup_memory(
+            test["framework"], test["user"], reset=True
+        )
         graph = build_graph(retrieve_fn, persist_fn)
 
+        t1 = time.time()
+
+        # ─────────────────────────────
+        # 2. Load memory ONLY if needed
+        # ─────────────────────────────
+        if test.get("is_memory_test"):
+            for msg in test.get("conversation", []):
+                persist_fn(msg, "acknowledged", test["user"])
+
+        t2 = time.time()
+
+        # ─────────────────────────────
+        # 3. Invoke with TIMEOUT + TRACE
+        # ─────────────────────────────
         config = {
             "configurable": {
                 "thread_id": f"eval_{test['user']}_{test['framework']}_{idx}",
@@ -515,13 +564,23 @@ def run_comprehensive_evaluation_from_excel(excel_path=EXCEL_PATH):
             }
         }
 
-        # Populate conversation history
-        for msg in test.get("conversation", []):
-            persist_fn(msg, "acknowledged", test["user"])
+        signal.alarm(60)
 
-        # Invoke agent
-        start_time = time.time()
         try:
+            # 🔥 STREAM to see where it stalls
+            start_time = time.time()
+
+            for step in graph.stream(
+                {
+                    "messages": [HumanMessage(content=test["question"])],
+                    "user_id": test["user"],
+                    "user_name": USERS.get(test["user"], {}).get("name", test["user"]),
+                },
+                config=config,
+            ):
+                step_name = list(step.keys())[0]
+                print(f"      → Node executed: {step_name}")
+
             graph_response = graph.invoke(
                 {
                     "messages": [HumanMessage(content=test["question"])],
@@ -530,17 +589,32 @@ def run_comprehensive_evaluation_from_excel(excel_path=EXCEL_PATH):
                 },
                 config=config,
             )
+
+            signal.alarm(0)
+
             response_time = time.time() - start_time
 
-            if "messages" in graph_response and graph_response["messages"]:
+            if "messages" in graph_response:
                 assistant_text = graph_response["messages"][-1].content
             else:
                 assistant_text = str(graph_response)
 
+        except TimeoutException:
+            print("   ⏰ TIMEOUT during graph execution")
+            assistant_text = "TIMEOUT"
+            response_time = 60
+
         except Exception as e:
-            print(f"   ❌ ERROR: {str(e)[:100]}")
-            assistant_text = f"ERROR: {str(e)}"
+            signal.alarm(0)
+            print(f"   ❌ ERROR: {e}")
+            assistant_text = str(e)
             response_time = 0
+
+        t3 = time.time()
+
+        # ─────────────────────────────
+        # 4. Evaluation
+        # ─────────────────────────────
 
         # Run evaluations
         accuracy = evaluate_clinical_accuracy(assistant_text, test)
@@ -593,13 +667,18 @@ def run_comprehensive_evaluation_from_excel(excel_path=EXCEL_PATH):
         df.at[idx, "run_status"] = "Done"
         df.at[idx, "last_run_timestamp"] = result["run_timestamp"]
 
+        # ─────────────────────────────
+        # 5. Debug timing
+        # ─────────────────────────────
+        print(f"   Setup: {t1 - t0:.2f}s")
+        print(f"   Memory load: {t2 - t1:.2f}s")
+        print(f"   Invoke: {t3 - t2:.2f}s")
+        print(f"   Memory after: {process.memory_info().rss / 1024**2:.2f} MB")
+
         # -------------------------
         # Memory cleanup after each test
         # -------------------------
-        del assistant_text
-        del graph
-        del retrieve_fn
-        del persist_fn
+        del assistant_text, graph, retrieve_fn, persist_fn
         gc.collect()
         print(
             f"   Memory after cleanup: {process.memory_info().rss / 1024**2:.2f} MB\n"
@@ -626,268 +705,6 @@ def run_comprehensive_evaluation_from_excel(excel_path=EXCEL_PATH):
     print(f"✅ Results appended to CSV: {PERSISTENT_CSV}")
 
     return results_list
-
-
-def _classify_test_type(test: Dict) -> str:
-    """Classify test case type for reporting."""
-    if test.get("is_off_topic"):
-        return "off_topic_refusal"
-    elif test.get("privacy_test"):
-        return "privacy"
-    elif test.get("is_memory_test"):
-        return "memory"
-    elif test.get("safety_critical"):
-        return "safety_critical"
-    elif test.get("clinical_reasoning_required"):
-        return "clinical_reasoning"
-    elif test.get("requires_specific_value"):
-        return "specific_value"
-    elif test.get("multi_guideline"):
-        return "integration"
-    else:
-        return "factual"
-
-
-def analyze_and_report_results(results: List[Dict]):
-    """Analyze results and generate detailed report."""
-
-    if not results:
-        print("⚠️  No results to analyze.")
-        return
-
-    print("\n" + "=" * 80)
-    print("EVALUATION RESULTS SUMMARY")
-    print("=" * 80)
-
-    # Group by framework
-    by_framework = defaultdict(list)
-    for r in results:
-        by_framework[r["framework"]].append(r)
-
-    for fw, fw_results in by_framework.items():
-        print(f"\n{'═' * 60}")
-        print(f"{'🔵 MEM0' if fw == 'mem0' else '🟢 LANGMEM'}")
-        print(f"{'═' * 60}")
-
-        # Overall metrics
-        print(f"\n📊 OVERALL PERFORMANCE ({len(fw_results)} tests)")
-        print(f"{'─' * 60}")
-
-        avg_recall = sum(r["factual_recall"] for r in fw_results) / len(fw_results)
-        avg_precision = sum(r["factual_precision"] for r in fw_results) / len(
-            fw_results
-        )
-
-        value_tests = [r for r in fw_results if r["requires_specific_value"]]
-        avg_value_acc = (
-            sum(r["clinical_value_accuracy"] for r in value_tests) / len(value_tests)
-            if value_tests
-            else 0
-        )
-
-        print(f"  Factual Recall:           {avg_recall:.1%}")
-        print(f"  Factual Precision:        {avg_precision:.1%}")
-        if value_tests:
-            print(
-                f"  Clinical Value Accuracy:  {avg_value_acc:.1%} ({len(value_tests)} tests)"
-            )
-
-        # Safety metrics
-        safety_tests = [r for r in fw_results if r["safety_check"] is not None]
-        if safety_tests:
-            safety_pass = sum(1 for r in safety_tests if r["safety_check"] == "PASS")
-            safety_rate = safety_pass / len(safety_tests)
-            total_violations = sum(r.get("violation_count", 0) for r in safety_tests)
-
-            print(f"\n⚠️  SAFETY CRITICAL TESTS ({len(safety_tests)} tests)")
-            print(f"{'─' * 60}")
-            print(f"  Pass Rate:                {safety_rate:.1%}")
-            print(f"  Total Violations:         {total_violations}")
-
-            if total_violations > 0:
-                print("  ❌ FAILED SAFETY TESTS:")
-                for r in safety_tests:
-                    if r["safety_check"] == "FAIL":
-                        print(f"     • Q: {r['question'][:50]}...")
-                        print(f"       Violations: {r['safety_violations']}")
-
-        # Refusal metrics
-        refusal_tests = [r for r in fw_results if r["should_refuse"]]
-        if refusal_tests:
-            refusal_correct = sum(1 for r in refusal_tests if r["refusal_appropriate"])
-            refusal_rate = refusal_correct / len(refusal_tests)
-
-            print(f"\n🚫 REFUSAL TESTS ({len(refusal_tests)} tests)")
-            print(f"{'─' * 60}")
-            print(f"  Appropriate Refusal:      {refusal_rate:.1%}")
-
-            # Break down by type
-            off_topic = [r for r in refusal_tests if r["is_off_topic_test"]]
-            privacy = [r for r in refusal_tests if r["is_privacy_test"]]
-
-            if off_topic:
-                off_topic_correct = sum(
-                    1 for r in off_topic if r["refusal_appropriate"]
-                )
-                print(
-                    f"  Off-topic Refusal:        {off_topic_correct}/{len(off_topic)} correct"
-                )
-
-            if privacy:
-                privacy_correct = sum(1 for r in privacy if r["refusal_appropriate"])
-                print(
-                    f"  Privacy Refusal:          {privacy_correct}/{len(privacy)} correct"
-                )
-
-        # Clinical reasoning
-        reasoning_tests = [
-            r for r in fw_results if r["clinical_reasoning_score"] is not None
-        ]
-        if reasoning_tests:
-            avg_reasoning = sum(
-                r["clinical_reasoning_score"] for r in reasoning_tests
-            ) / len(reasoning_tests)
-
-            print(f"\n🧠 CLINICAL REASONING ({len(reasoning_tests)} tests)")
-            print(f"{'─' * 60}")
-            print(f"  Reasoning Score:          {avg_reasoning:.1%}")
-
-        # Citation quality
-        cited = sum(1 for r in fw_results if r["has_citation"])
-        specific_cites = sum(
-            1 for r in fw_results if r["citation_quality"] == "specific"
-        )
-
-        print("\n📚 CITATION QUALITY")
-        print(f"{'─' * 60}")
-        print(
-            f"  Has Citations:            {cited}/{len(fw_results)} ({cited / len(fw_results):.1%})"
-        )
-        print(
-            f"  Specific Citations:       {specific_cites}/{len(fw_results)} ({specific_cites / len(fw_results):.1%})"
-        )
-
-        # Performance
-        avg_time = sum(r["response_time_sec"] for r in fw_results) / len(fw_results)
-
-        print("\n⚡ PERFORMANCE")
-        print(f"{'─' * 60}")
-        print(f"  Avg Response Time:        {avg_time:.2f}s")
-
-        # Test type breakdown
-        print("\n📋 TEST TYPE BREAKDOWN")
-        print(f"{'─' * 60}")
-        test_types = defaultdict(list)
-        for r in fw_results:
-            test_types[r["test_type"]].append(r)
-
-        for test_type, type_results in sorted(test_types.items()):
-            avg_recall_type = sum(r["factual_recall"] for r in type_results) / len(
-                type_results
-            )
-            print(
-                f"  {test_type:25s} {len(type_results):2d} tests | Recall: {avg_recall_type:.1%}"
-            )
-
-    # Save results
-    save_results(results)
-
-
-def save_results(results: List[Dict]):
-    """Save detailed results to CSV and JSON."""
-    import os
-
-    os.makedirs(EVAL_DIR, exist_ok=True)
-
-    # Save CSV
-    csv_path = os.path.join(EVAL_DIR, "eval_results_enhanced.csv")
-    with open(csv_path, "w", newline="", encoding="utf-8") as f:
-        if results:
-            fieldnames = list(results[0].keys())
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(results)
-
-    print(f"\n✅ Results saved to {csv_path}")
-
-    # Save summary JSON
-    summary = generate_summary(results)
-    summary_path = os.path.join(EVAL_DIR, "eval_summary_enhanced.json")
-    with open(summary_path, "w", encoding="utf-8") as f:
-        json.dump(summary, f, indent=2)
-
-    print(f"✅ Summary saved to {summary_path}")
-
-
-def generate_summary(results: List[Dict]) -> Dict:
-    """Generate summary statistics."""
-
-    summary = {
-        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "total_tests": len(results),
-        "frameworks": {},
-    }
-
-    by_framework = defaultdict(list)
-    for r in results:
-        by_framework[r["framework"]].append(r)
-
-    for fw, fw_results in by_framework.items():
-        # Calculate metrics
-        safety_tests = [r for r in fw_results if r["safety_check"] is not None]
-        safety_rate = (
-            sum(1 for r in safety_tests if r["safety_check"] == "PASS")
-            / len(safety_tests)
-            if safety_tests
-            else None
-        )
-
-        refusal_tests = [r for r in fw_results if r["should_refuse"]]
-        refusal_accuracy = (
-            sum(1 for r in refusal_tests if r["refusal_appropriate"])
-            / len(refusal_tests)
-            if refusal_tests
-            else None
-        )
-
-        reasoning_tests = [
-            r for r in fw_results if r["clinical_reasoning_score"] is not None
-        ]
-        avg_reasoning = (
-            sum(r["clinical_reasoning_score"] for r in reasoning_tests)
-            / len(reasoning_tests)
-            if reasoning_tests
-            else None
-        )
-
-        summary["frameworks"][fw] = {
-            "total_tests": len(fw_results),
-            "avg_factual_recall": round(
-                sum(r["factual_recall"] for r in fw_results) / len(fw_results), 3
-            ),
-            "avg_factual_precision": round(
-                sum(r["factual_precision"] for r in fw_results) / len(fw_results), 3
-            ),
-            "avg_response_time": round(
-                sum(r["response_time_sec"] for r in fw_results) / len(fw_results), 2
-            ),
-            "safety_pass_rate": round(safety_rate, 3)
-            if safety_rate is not None
-            else None,
-            "refusal_accuracy": round(refusal_accuracy, 3)
-            if refusal_accuracy is not None
-            else None,
-            "clinical_reasoning_score": round(avg_reasoning, 3)
-            if avg_reasoning is not None
-            else None,
-            "specific_citation_rate": round(
-                sum(1 for r in fw_results if r["citation_quality"] == "specific")
-                / len(fw_results),
-                3,
-            ),
-        }
-
-    return summary
 
 
 if __name__ == "__main__":
