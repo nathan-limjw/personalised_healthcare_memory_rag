@@ -3,6 +3,7 @@ import os
 import re
 import signal
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from typing import Dict, List
 
 import pandas as pd
@@ -466,20 +467,20 @@ def _classify_test_type(test: Dict) -> str:
         return "factual"
 
 
-# ══════════════════════════════════════════════════════════════
-# TIMEOUT HANDLER
-# ══════════════════════════════════════════════════════════════
+# # ══════════════════════════════════════════════════════════════
+# # TIMEOUT HANDLER
+# # ══════════════════════════════════════════════════════════════
 
 
-class TimeoutException(Exception):
-    pass
+# class TimeoutException(Exception):
+#     pass
 
 
-def timeout_handler(signum, frame):
-    raise TimeoutException()
+# def timeout_handler(signum, frame):
+#     raise TimeoutException()
 
 
-signal.signal(signal.SIGALRM, timeout_handler)
+# signal.signal(signal.SIGALRM, timeout_handler)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -590,7 +591,9 @@ def run_comprehensive_evaluation_from_excel(excel_path=EXCEL_PATH):
                 config=config,
             )
 
-            signal.alarm(0)
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(graph_response)
+                graph_response = future.result(timeout=60)  # 60-second timeout
 
             response_time = time.time() - start_time
 
@@ -599,7 +602,7 @@ def run_comprehensive_evaluation_from_excel(excel_path=EXCEL_PATH):
             else:
                 assistant_text = str(graph_response)
 
-        except TimeoutException:
+        except TimeoutError:
             print("   ⏰ TIMEOUT during graph execution")
             assistant_text = "TIMEOUT"
             response_time = 60
