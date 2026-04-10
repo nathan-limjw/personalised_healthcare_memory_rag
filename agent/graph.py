@@ -6,11 +6,10 @@ import sqlite3
 from typing import Literal
 
 import streamlit as st
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_ollama import ChatOllama
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
-from typing import Literal
 
 from agent.state import AgentState
 from config import OLLAMA_BASE_URL, OLLAMA_MODEL, SQLITE_DB_PATH, USERS
@@ -81,6 +80,7 @@ def format_memory_context(memories):
 
 ### FOR OTHER MODELS
 
+
 # -------------------------------------------------------------------------------------
 # def relevance_node(state: AgentState):
 #     user_message = state["messages"][-1]
@@ -98,6 +98,8 @@ def format_memory_context(memories):
 #     response = structured_llm.invoke([SystemMessage(system_prompt), user_message])
 
 #     return {"relevance": response.relevance, "reason": response.reason}
+
+
 # -------------------------------------------------------------------------------------
 
 
@@ -107,30 +109,37 @@ def router(state: AgentState) -> Literal["agent", "non_medical"]:
     else:
         return "non_medical"
 
-<<<<<<< Updated upstream
 
-=======
->>>>>>> Stashed changes
 ### FOR QWEN
 
 
 # -------------------------------------------------------------------------------------
-def relevance_node(state):
+def relevance_node(state: AgentState):
     user_message = state["messages"][-1].content
 
-    prompt = f"""
-Classify this as:
-relevant OR irrelevant
+    # Simple, high-instruction prompt for small models
+    system_prompt = """
+    Classify the user message. 
+    If it is about medical topics, clinical guidelines, or formatting requests, reply ONLY with the word 'relevant'.
+    Otherwise, reply ONLY with the word 'irrelevant'.
+    
+    Message: """
 
-Message: {user_message}
-"""
+    # Use standard invoke instead of structured output
+    response = llm.invoke(
+        [SystemMessage(content=system_prompt), HumanMessage(content=user_message)]
+    )
 
-    response = llm.invoke(prompt)
-    text = response.content.lower()
+    # Clean the response
+    result = response.content.lower().strip()
 
-    if "relevant" in text:
-        return {"relevance": "relevant"}
-    return {"relevance": "irrelevant"}
+    # Robust check for the 4B model's output
+    is_relevant = "relevant" in result and "irrelevant" not in result
+
+    return {
+        "relevance": "relevant" if is_relevant else "irrelevant",
+        "reason": "Direct classification",
+    }
 
 
 # -------------------------------------------------------------------------------------
