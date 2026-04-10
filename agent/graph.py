@@ -3,7 +3,6 @@ import json
 import os
 import re
 import sqlite3
-from typing import Literal
 
 import streamlit as st
 from langchain_core.messages import SystemMessage
@@ -11,7 +10,7 @@ from langchain_ollama import ChatOllama
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 
-from agent.state import AgentState, RelevanceOutput
+from agent.state import AgentState
 from config import OLLAMA_BASE_URL, OLLAMA_MODEL, SQLITE_DB_PATH, USERS
 from memory.langmem_memory import get_langmem_store
 from memory.langmem_memory import search_memory as langmem_search
@@ -78,29 +77,57 @@ def format_memory_context(memories):
         return "No previous interactions."
 
 
-def relevance_node(state: AgentState):
-    user_message = state["messages"][-1]
-    structured_llm = llm.with_structured_output(RelevanceOutput)
-    system_prompt = """
-        Classify the following user message on whether it is relevant 
+### FOR OTHER MODELS
 
-        RELEVANT QUERIES:
-        - Medical or Clinical Questions
-        - The user's preferred response format or style (e.g. paragraphs, bullet points, less than XXX words)
+# -------------------------------------------------------------------------------------
+# def relevance_node(state: AgentState):
+#     user_message = state["messages"][-1]
+#     structured_llm = llm.with_structured_output(RelevanceOutput)
+#     system_prompt = """
+#         Classify the following user message on whether it is relevant
 
-        Everything that does not fall under this category is considered irrelevant
-        """
+#         RELEVANT QUERIES:
+#         - Medical or Clinical Questions
+#         - The user's preferred response format or style (e.g. paragraphs, bullet points, less than XXX words)
 
-    response = structured_llm.invoke([SystemMessage(system_prompt), user_message])
+#         Everything that does not fall under this category is considered irrelevant
+#         """
 
-    return {"relevance": response.relevance, "reason": response.reason}
+#     response = structured_llm.invoke([SystemMessage(system_prompt), user_message])
+
+#     return {"relevance": response.relevance, "reason": response.reason}
 
 
-def router(state: AgentState) -> Literal["agent", "non_medical"]:
-    if state["relevance"] == "relevant":
-        return "agent"
-    else:
-        return "non_medical"
+# def router(state: AgentState) -> Literal["agent", "non_medical"]:
+#     if state["relevance"] == "relevant":
+#         return "agent"
+#     else:
+#         return "non_medical"
+# -------------------------------------------------------------------------------------
+
+### FOR QWEN
+
+
+# -------------------------------------------------------------------------------------
+def relevance_node(state):
+    user_message = state["messages"][-1].content
+
+    prompt = f"""
+Classify this as:
+relevant OR irrelevant
+
+Message: {user_message}
+"""
+
+    response = llm.invoke(prompt)
+    text = response.content.lower()
+
+    if "relevant" in text:
+        return {"relevance": "relevant"}
+    return {"relevance": "irrelevant"}
+
+
+# -------------------------------------------------------------------------------------
 
 
 def make_agent_node(memory_retrieve_fn, memory_persist_fn):
