@@ -2,10 +2,10 @@ import json
 
 import pandas as pd
 
-from eval.more_test_cases import TEST_CASES  # your current test cases
+from eval.gold_standard_test_cases import TEST_CASES  # your current test cases
 
 # Path to save Excel
-excel_path = "more_test_cases.xlsx"
+excel_path = "eval/gold_standard_test_cases.xlsx"
 
 # Prepare rows for Excel
 rows = []

@@ -7,15 +7,16 @@ import os
 OLLAMA_BASE_URL = "http://localhost:11434"
 # OLLAMA_MODEL = "llama3.2:3b"
 # OLLAMA_MODEL = "llama3.1:8b"
-OLLAMA_MODEL = "qwen3-4b-q4_k_m:latest"
+# OLLAMA_MODEL = "qwen3-4b-q4_k_m:latest"
+OLLAMA_MODEL = "qwen3.5:9b"
 EMBEDDING_MODEL = "nomic-embed-text"  # pull via: ollama pull nomic-embed-text
 
 # ════════════════════════════════
 # EVALUATION FILES
 # ════════════════════════════════
 
-EXCEL_PATH = "eval/more_test_cases.xlsx"
-PERSISTENT_CSV = "eval/evaluation_results.csv"
+EXCEL_PATH = "eval/gold_standard_test_cases.xlsx"
+PERSISTENT_CSV = "data/evaluation_results/summary_of_results.csv"
 
 
 # ════════════════════════════════
