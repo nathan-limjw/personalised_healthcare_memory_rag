@@ -27,6 +27,7 @@ rm -rf ./data/rag_index \
 ```bash 
 cd  # ensure you are on the root directory
 source venv/bin/activate
+python3 -m eval.convert_test_cases_to_excel # can change Line 10 to change to more_test_cases
 python3 -m eval.evaluate 
 
 ```
