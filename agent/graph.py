@@ -19,7 +19,7 @@ rag_index, rag_texts, rag_sources = load_index()
 
 os.environ["OLLAMA_USE_GPU"] = "0"
 
-llm = ChatOllama(model=OLLAMA_MODEL, base_url=OLLAMA_BASE_URL, temperature=0.1)
+llm = ChatOllama(model=OLLAMA_MODEL, base_url=OLLAMA_BASE_URL, temperature=0)
 
 
 def format_memory_context(memories):
@@ -77,8 +77,13 @@ def relevance_node(state: AgentState):
     user_message = state["messages"][-1]
     structured_llm = llm.with_structured_output(RelevanceOutput)
     system_prompt = """
-        Classify the following user message on whether it is relevant (medical or clinical in nature) 
-        or irrelevant. Provide a reason as well.
+        Classify the following user message on whether it is relevant 
+
+        RELEVANT QUERIES:
+        - Medical or Clinical Questions
+        - The user's preferred response format or style (e.g. paragraphs, bullet points, less than XXX words)
+
+        Everything that does not fall under this category is considered irrelevant
         """
 
     response = structured_llm.invoke([SystemMessage(system_prompt), user_message])
@@ -162,7 +167,7 @@ def make_agent_node(memory_retrieve_fn, memory_persist_fn):
 
         # ── 0. GET STATIC DEFAULTS ─────────────────────────────────
         user_profile = USERS.get(user_id, {})
-        default_style = user_profile.get("style", "Professional and accurate.")
+        default_style = user_profile.get("style")
 
         # ── RETRIEVE MEMORIES ──────────────────────────────────────
         raw_memories = memory_retrieve_fn(user_message, user_id)
@@ -177,6 +182,13 @@ def make_agent_node(memory_retrieve_fn, memory_persist_fn):
         rag_context = ""
         if rag_index is not None:
             chunks = retrieve(user_message, rag_index, rag_texts, rag_sources)
+            # 🔒 HARD GATING
+            if not chunks or len(chunks) == 0:
+                return {
+                    "messages": [
+                        "I cannot find information on this in the available clinical guidelines."
+                    ]
+                }
             rag_context = "\n\n".join(f"[{c['source']}]\n{c['text']}" for c in chunks)
         else:
             rag_context = "No clinical manuals loaded yet."
@@ -187,7 +199,7 @@ def make_agent_node(memory_retrieve_fn, memory_persist_fn):
 ## USER CONTEXT
 - Name: {user_name}
 - Role: {user_profile.get("role", "Unknown")}
-- Preferred Style (TO BE STRICTLY FOLLOWED): {default_style}
+- CRITICAL STYLE REQUIREMENT - OVERRIDE ALL OTHER FORMATTING: {default_style}
 
 ## WHAT YOU REMEMBER ABOUT {user_name.upper()}
 {memory_context}
@@ -210,23 +222,6 @@ def make_agent_node(memory_retrieve_fn, memory_persist_fn):
   → State what you found and cite the source
   → Clearly state what information is missing
   → Do NOT fill gaps with general knowledge
-
-### Clinical Reasoning Requirement (MANDATORY)
-When answering clinical questions, you MUST structure your response EXACTLY as follows:
-
-1. Direct Answer  
-   - Provide a clear and concise answer to the question
-
-2. Supporting Evidence  
-   - Present relevant information from the AUTHORIZED CLINICAL GUIDELINES  
-   - EACH sentence MUST include a citation
-
-3. Clinical Reasoning  
-   - Explain step-by-step how the evidence supports the answer  
-   - Clearly connect the guideline information to the conclusion  
-   - You MUST reference the cited evidence, but citations are NOT required in every sentence 
-
-Failure to follow this structure results in an incomplete response.
 
 ### Citation Requirements
 - Each sentence containing clinical information MUST include its own citation
@@ -256,9 +251,10 @@ Patient safety depends on accuracy. Fabricating medical information, drug names,
 ## SELF-CHECK BEFORE RESPONDING
 ✓ Is every claim grounded in the AUTHORIZED CLINICAL GUIDELINES?
 ✓ Does every clinical statement have a valid, specific citation (not a placeholder)?
-✓ Am I honoring {user_name}'s style preferences?
 ✓ Have I removed all JSON/technical metadata from my response?
 ✓ If any check fails → REFUSE to answer that portion
+✓ Does my response format match {user_name}'s style: "{default_style}"? Also format nicely and present answer in a clear manner.
+
 """
 
         messages_for_llm = [SystemMessage(content=system_prompt)] + state["messages"]
@@ -286,11 +282,47 @@ Patient safety depends on accuracy. Fabricating medical information, drug names,
 
 
 def non_medical_node(state: AgentState):
-    return {
-        "messages": [
-            "I am only able to assist with clinical and medical questions based on the provided guidelines."
-        ]
-    }
+    user_id = state["user_id"]
+    user_name = state["user_name"]
+    user_message = state["messages"][-1].content
+
+    # Get user profile for style
+    user_profile = USERS.get(user_id, {})
+    default_style = user_profile.get("style", "")
+    role = user_profile.get("role", "healthcare professional")
+
+    # Get recent conversation context (last 3-5 exchanges)
+    recent_context = ""
+    if len(state["messages"]) > 1:
+        recent_msgs = state["messages"][-6:-1]  # Last 5 messages before current
+        recent_context = "\n".join(
+            [msg.content for msg in recent_msgs[-3:]]
+        )  # Last 3 for brevity
+
+    # Build contextual prompt
+    prompt = f"""You are a clinical assistant speaking to {user_name}, a {role}.
+
+Recent conversation context:
+{recent_context if recent_context else "First interaction"}
+
+Current question: "{user_message}"
+
+This question is not clinical/medical. Respond warmly but redirect:
+1. Acknowledge their question (show you understood the context from conversation)
+2. Politely explain you can only help with clinical questions from authorized guidelines
+3. If the recent conversation mentioned any clinical topics, offer to help with those
+
+IMPORTANT - Match this style: {default_style}
+
+Keep response natural and brief."""
+
+    response = llm.invoke(prompt)
+    content = response.content.strip().strip('"').strip("'")
+
+    if not content:
+        content = "I can only assist with clinical and medical questions based on the provided guidelines."
+
+    return {"messages": [content]}
 
 
 def build_graph(memory_retrieve_fn, memory_persist_fn):

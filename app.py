@@ -26,6 +26,18 @@ st.set_page_config(
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# UI RESET HELPERS
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def reset_chat_ui():
+    """Wipes the chat history and stops processing when configurations change."""
+    st.session_state.messages = []
+    st.session_state.processing = False
+    st.session_state.graph = None
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # MEMORY FRAMEWORK SETUP
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -231,6 +243,7 @@ with st.sidebar:
         "Select framework:",
         ["Mem0", "LangMem"],
         key="framework_select",
+        on_change=reset_chat_ui,
         help="Choose the memory backend for storing clinical context",
     )
 
@@ -241,6 +254,7 @@ with st.sidebar:
         list(USERS.keys()),
         format_func=lambda x: USERS[x]["name"],
         key="user_select",
+        on_change=reset_chat_ui,
         help="Select which healthcare professional you are",
     )
 
@@ -398,17 +412,17 @@ if st.session_state.processing and st.session_state.messages:
                     config,
                 ):
                     # Parse LangGraph chunk structure
-                    print(f"[DEBUG] Received chunk with nodes: {list(chunk.keys())}")
+                    # print(f"[DEBUG] Received chunk with nodes: {list(chunk.keys())}")
 
                     for node_name, node_output in chunk.items():
                         print(f"[DEBUG] Processing node: {node_name}")
 
-                        if node_name == "agent":
+                        if node_name in ["agent", "non_medical"]:
                             # Extract content from various possible structures
                             content = ""
 
-                            print(f"[DEBUG] Raw node_output type: {type(node_output)}")
-                            print(f"[DEBUG] Raw node_output: {node_output}")
+                            # print(f"[DEBUG] Raw node_output type: {type(node_output)}")
+                            # print(f"[DEBUG] Raw node_output: {node_output}")
 
                             # Handle dict with 'messages' key (your actual structure)
                             if (
@@ -416,42 +430,47 @@ if st.session_state.processing and st.session_state.messages:
                                 and "messages" in node_output
                             ):
                                 messages = node_output["messages"]
-                                print(
-                                    f"[DEBUG] Found messages key, type: {type(messages)}, value: {messages}"
+                                content = (
+                                    messages[-1]
+                                    if isinstance(messages, list)
+                                    else messages
                                 )
+                                # print(
+                                #     f"[DEBUG] Found messages key, type: {type(messages)}, value: {messages}"
+                                # )
                                 # Messages could be a list or a single item
                                 if isinstance(messages, list):
                                     # Join all messages or take the last one
                                     content = messages[-1] if messages else ""
-                                    print(f"[DEBUG] Extracted from list: {content}")
+                                    # print(f"[DEBUG] Extracted from list: {content}")
                                 else:
                                     content = messages
-                                    print(f"[DEBUG] Extracted direct: {content}")
+                                    # print(f"[DEBUG] Extracted direct: {content}")
                             # Handle message objects with content attribute
                             elif hasattr(node_output, "content"):
                                 content = node_output.content
-                                print(f"[DEBUG] Extracted from .content: {content}")
+                                # print(f"[DEBUG] Extracted from .content: {content}")
                             # Handle dict with 'content' key
                             elif (
                                 isinstance(node_output, dict)
                                 and "content" in node_output
                             ):
                                 content = node_output["content"]
-                                print(f"[DEBUG] Extracted from ['content']: {content}")
+                                # print(f"[DEBUG] Extracted from ['content']: {content}")
                             # Handle raw strings
                             elif isinstance(node_output, str):
                                 content = node_output
-                                print(f"[DEBUG] Direct string: {content}")
+                                # print(f"[DEBUG] Direct string: {content}")
                             else:
                                 # Fallback: convert to string
                                 content = str(node_output)
-                                print(f"[DEBUG] Fallback str(): {content}")
+                                # print(f"[DEBUG] Fallback str(): {content}")
 
                             # Debug: Log what we're receiving
-                            print(
-                                f"[DEBUG] Final extracted content type: {type(content)}"
-                            )
-                            print(f"[DEBUG] Final extracted content: {content}")
+                            # print(
+                            #     f"[DEBUG] Final extracted content type: {type(content)}"
+                            # )
+                            # print(f"[DEBUG] Final extracted content: {content}")
 
                             # Filter out internal JSON/logging artifacts
                             # Only block content that looks like raw JSON memory dumps
@@ -470,12 +489,12 @@ if st.session_state.processing and st.session_state.messages:
 
                             if is_memory_log:
                                 # Skip internal memory processing logs
-                                print("[DEBUG] FILTERED as memory log")
+                                # print("[DEBUG] FILTERED as memory log")
                                 continue
 
                             # Append valid content
                             if content and isinstance(content, str) and content.strip():
-                                print(f"[DEBUG] ADDING to response: {content[:100]}")
+                                # print(f"[DEBUG] ADDING to response: {content[:100]}")
                                 full_response += content
                                 placeholder.markdown(full_response + "▌")
                             else:
