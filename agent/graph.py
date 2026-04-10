@@ -3,6 +3,7 @@ import json
 import os
 import re
 import sqlite3
+from typing import Literal
 
 import streamlit as st
 from langchain_core.messages import SystemMessage
@@ -96,14 +97,15 @@ def format_memory_context(memories):
 #     response = structured_llm.invoke([SystemMessage(system_prompt), user_message])
 
 #     return {"relevance": response.relevance, "reason": response.reason}
-
-
-# def router(state: AgentState) -> Literal["agent", "non_medical"]:
-#     if state["relevance"] == "relevant":
-#         return "agent"
-#     else:
-#         return "non_medical"
 # -------------------------------------------------------------------------------------
+
+
+def router(state: AgentState) -> Literal["agent", "non_medical"]:
+    if state["relevance"] == "relevant":
+        return "agent"
+    else:
+        return "non_medical"
+
 
 ### FOR QWEN
 
