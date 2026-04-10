@@ -82,22 +82,23 @@ def format_memory_context(memories):
 
 
 # -------------------------------------------------------------------------------------
-# def relevance_node(state: AgentState):
-#     user_message = state["messages"][-1]
-#     structured_llm = llm.with_structured_output(RelevanceOutput)
-#     system_prompt = """
-#         Classify the following user message on whether it is relevant
+def relevance_node(state: AgentState):
+    from agent.state import RelevanceOutput
+    user_message = state["messages"][-1]
+    structured_llm = llm.with_structured_output(RelevanceOutput)
+    system_prompt = """
+        Classify the following user message on whether it is relevant
 
-#         RELEVANT QUERIES:
-#         - Medical or Clinical Questions
-#         - The user's preferred response format or style (e.g. paragraphs, bullet points, less than XXX words)
+        RELEVANT QUERIES:
+        - Medical or Clinical Questions
+        - The user's preferred response format or style (e.g. paragraphs, bullet points, less than XXX words)
 
-#         Everything that does not fall under this category is considered irrelevant
-#         """
+        Everything that does not fall under this category is considered irrelevant
+        """
 
-#     response = structured_llm.invoke([SystemMessage(system_prompt), user_message])
+    response = structured_llm.invoke([SystemMessage(system_prompt), user_message])
 
-#     return {"relevance": response.relevance, "reason": response.reason}
+    return {"relevance": response.relevance, "reason": response.reason}
 
 
 # -------------------------------------------------------------------------------------
@@ -113,32 +114,32 @@ def router(state: AgentState) -> Literal["agent", "non_medical"]:
 
 
 # -------------------------------------------------------------------------------------
-def relevance_node(state: AgentState):
-    user_message = state["messages"][-1].content
+# def relevance_node(state: AgentState):
+#     user_message = state["messages"][-1].content
 
-    # Simple, high-instruction prompt for small models
-    system_prompt = """
-    Classify the user message. 
-    If it is about medical topics, clinical guidelines, or formatting requests, reply ONLY with the word 'relevant'.
-    Otherwise, reply ONLY with the word 'irrelevant'.
+#     # Simple, high-instruction prompt for small models
+#     system_prompt = """
+#     Classify the user message. 
+#     If it is about medical topics, clinical guidelines, or formatting requests, reply ONLY with the word 'relevant'.
+#     Otherwise, reply ONLY with the word 'irrelevant'.
     
-    Message: """
+#     Message: """
 
-    # Use standard invoke instead of structured output
-    response = llm.invoke(
-        [SystemMessage(content=system_prompt), HumanMessage(content=user_message)]
-    )
+#     # Use standard invoke instead of structured output
+#     response = llm.invoke(
+#         [SystemMessage(content=system_prompt), HumanMessage(content=user_message)]
+#     )
 
-    # Clean the response
-    result = response.content.lower().strip()
+#     # Clean the response
+#     result = response.content.lower().strip()
 
-    # Robust check for the 4B model's output
-    is_relevant = "relevant" in result and "irrelevant" not in result
+#     # Robust check for the 4B model's output
+#     is_relevant = "relevant" in result and "irrelevant" not in result
 
-    return {
-        "relevance": "relevant" if is_relevant else "irrelevant",
-        "reason": "Direct classification",
-    }
+#     return {
+#         "relevance": "relevant" if is_relevant else "irrelevant",
+#         "reason": "Direct classification",
+#     }
 
 
 # -------------------------------------------------------------------------------------
