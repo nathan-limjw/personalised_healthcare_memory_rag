@@ -109,7 +109,6 @@ def router(state: AgentState) -> Literal["agent", "non_medical"]:
     else:
         return "non_medical"
 
-
 ### FOR QWEN
 
 

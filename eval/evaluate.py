@@ -539,7 +539,7 @@ def run_comprehensive_evaluation_from_excel(excel_path=EXCEL_PATH):
         t0 = time.time()
 
         retrieve_fn, persist_fn = setup_memory(
-            test["framework"], test["user"], reset=True
+            test["framework"], test["user"]
         )
         graph = build_graph(retrieve_fn, persist_fn)
 
