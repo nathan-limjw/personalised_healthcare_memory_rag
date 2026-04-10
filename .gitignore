@@ -8,3 +8,5 @@ venv/
 data/evaluation_results/
 data/memory_stores/
 data/rag_index/
+
+eval/gold_standard_test_cases.xlsx

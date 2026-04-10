@@ -10,6 +10,7 @@ from langchain_core.messages import SystemMessage
 from langchain_ollama import ChatOllama
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
+from typing import Literal
 
 from agent.state import AgentState
 from config import OLLAMA_BASE_URL, OLLAMA_MODEL, SQLITE_DB_PATH, USERS
@@ -106,7 +107,10 @@ def router(state: AgentState) -> Literal["agent", "non_medical"]:
     else:
         return "non_medical"
 
+<<<<<<< Updated upstream
 
+=======
+>>>>>>> Stashed changes
 ### FOR QWEN
 
 
