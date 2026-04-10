@@ -1,257 +1,577 @@
+"""
+Healthcare Memory RAG - Streamlit Application
+A clinical assistant with RAG retrieval and intelligent memory systems
+"""
+
+import traceback
+from typing import Callable, List, Tuple
+
 import streamlit as st
-from langchain_core.messages import HumanMessage
 
 from agent.graph import build_graph
 from config import USERS
+from memory.langmem_memory import get_langmem_store
+from memory.mem0_memory import get_mem0
 from rag.loader import chunk_documents, load_pdfs
 from rag.vectorstore import build_index, load_index
 
-st.set_page_config(page_title="Healthcare Memory RAG", page_icon="🏥", layout="wide")
+# ═══════════════════════════════════════════════════════════════════════════
+# PAGE CONFIGURATION
+# ═══════════════════════════════════════════════════════════════════════════
+
+st.set_page_config(
+    page_title="Healthcare Memory RAG",
+    page_icon="🏥",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
 
-# ── MEMORY SETUP ───────────────────────────────────────────────────────────
-def setup_memory(framework_name, user_key=None, reset=False):
-    """Initialise memory backend and return retrieve/persist functions."""
+# ═══════════════════════════════════════════════════════════════════════════
+# UI RESET HELPERS
+# ═══════════════════════════════════════════════════════════════════════════
 
-    if reset:
-        if framework_name in st.session_state.memory_objects:
-            del st.session_state.memory_objects[framework_name]
 
-    if framework_name == "mem0":
-        from memory.mem0_memory import add_memory, get_mem0, search_memory
+def reset_chat_ui():
+    """Wipes the chat history and stops processing when configurations change."""
+    st.session_state.messages = []
+    st.session_state.processing = False
+    st.session_state.graph = None
 
-        if "mem0" not in st.session_state.memory_objects:
-            st.session_state.memory_objects["mem0"] = get_mem0(user_key)
 
-        mem = st.session_state.memory_objects["mem0"]
+# ═══════════════════════════════════════════════════════════════════════════
+# MEMORY FRAMEWORK SETUP
+# ═══════════════════════════════════════════════════════════════════════════
 
-        def retrieve(query, user_id):
-            return search_memory(mem, query, user_id)
 
-        def persist(user_msg, assistant_msg, user_id):
-            add_memory(
-                mem,
-                [
-                    {"role": "user", "content": user_msg},
-                    {"role": "assistant", "content": assistant_msg},
-                ],
-                user_id,
-            )
+def initialize_mem0(user_key: str):
+    """Initialize Mem0 memory backend."""
+    from memory.mem0_memory import add_memory, search_memory
 
-    elif framework_name == "langmem":
-        from memory.langmem_intelligence import intelligent_persist
-        from memory.langmem_memory import get_langmem_store
+    mem = get_mem0(user_key)
 
-        if "langmem" not in st.session_state.memory_objects:
-            st.session_state.memory_objects["langmem"] = get_langmem_store()
-        store = st.session_state.memory_objects["langmem"]
+    def retrieve(query: str, user_id: str) -> List[str]:
+        return search_memory(mem, query, user_id)
 
-        def retrieve(query, user_id):
-            # Ensure this matches your langmem_memory.py function signature
+    def persist(user_msg: str, assistant_msg: str, user_id: str):
+        add_memory(
+            mem,
+            [
+                {"role": "user", "content": user_msg},
+                {"role": "assistant", "content": assistant_msg},
+            ],
+            user_id,
+        )
+
+    return mem, retrieve, persist
+
+
+def initialize_langmem(user_key: str):
+    """Initialize LangMem memory backend."""
+    from memory.langmem_intelligence import intelligent_persist
+    from memory.langmem_memory import search_memory
+
+    store = get_langmem_store()
+
+    def retrieve(query: str, user_id: str) -> List[str]:
+        return search_memory(store, query, user_id)
+
+    def persist(user_msg: str, assistant_msg: str, user_id: str):
+        intelligent_persist(store, user_msg, assistant_msg, user_id)
+
+    return store, retrieve, persist
+
+
+def setup_memory(framework: str, user_key: str) -> Tuple[Callable, Callable]:
+    """
+    Setup memory backend and return retrieve/persist functions.
+
+    Args:
+        framework: "mem0" or "langmem"
+        user_key: User identifier
+
+    Returns:
+        Tuple of (retrieve_fn, persist_fn)
+    """
+    framework = framework.lower()
+
+    # Check if already initialized
+    if framework in st.session_state.memory_objects:
+        # Reconstruct functions from existing memory object
+        if framework == "mem0":
+            from memory.mem0_memory import add_memory, search_memory
+
+            mem = st.session_state.memory_objects["mem0"]
+
+            def retrieve(query: str, user_id: str) -> List[str]:
+                return search_memory(mem, query, user_id)
+
+            def persist(user_msg: str, assistant_msg: str, user_id: str):
+                add_memory(
+                    mem,
+                    [
+                        {"role": "user", "content": user_msg},
+                        {"role": "assistant", "content": assistant_msg},
+                    ],
+                    user_id,
+                )
+
+            return retrieve, persist
+
+        elif framework == "langmem":
+            from memory.langmem_intelligence import intelligent_persist
             from memory.langmem_memory import search_memory
 
-            return search_memory(store, query, user_id)
+            store = st.session_state.memory_objects["langmem"]
 
-        def persist(user_msg, assistant_msg, user_id):
-            # ── THIS IS THE KEY CHANGE ──
-            # We now pass the user_id so extract_facts can find the USERS config
-            intelligent_persist(store, user_msg, assistant_msg, user_id)
+            def retrieve(query: str, user_id: str) -> List[str]:
+                return search_memory(store, query, user_id)
+
+            def persist(user_msg: str, assistant_msg: str, user_id: str):
+                intelligent_persist(store, user_msg, assistant_msg, user_id)
+
+            return retrieve, persist
+
+    # Initialize new memory backend
+    if framework == "mem0":
+        mem, retrieve, persist = initialize_mem0(user_key)
+        st.session_state.memory_objects["mem0"] = mem
+    elif framework == "langmem":
+        store, retrieve, persist = initialize_langmem(user_key)
+        st.session_state.memory_objects["langmem"] = store
+    else:
+        raise ValueError(f"Unknown framework: {framework}")
 
     return retrieve, persist
 
 
-def get_all_memories_for_user(framework_name, user_id, memory_objects):
-    """Get all stored memories for current user."""
+def get_all_memories(framework: str, user_id: str) -> List[str]:
+    """Retrieve all stored memories for a user."""
+    framework = framework.lower()
+
     try:
-        if framework_name == "mem0" and "mem0" in memory_objects:
+        if framework == "mem0" and "mem0" in st.session_state.memory_objects:
             from memory.mem0_memory import get_all_memories
 
-            return get_all_memories(memory_objects["mem0"], user_id)
-        elif framework_name == "langmem" and "langmem" in memory_objects:
+            return get_all_memories(st.session_state.memory_objects["mem0"], user_id)
+
+        elif framework == "langmem" and "langmem" in st.session_state.memory_objects:
             from memory.langmem_memory import get_all_memories
 
-            return get_all_memories(memory_objects["langmem"], user_id)
+            return get_all_memories(st.session_state.memory_objects["langmem"], user_id)
+
     except Exception as e:
-        return [f"Error fetching memories: {e}"]
+        st.error(f"Error fetching memories: {e}")
+        return []
+
     return []
 
 
-# ── SESSION STATE INIT ─────────────────────────────────────────────────────
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-if "memory_objects" not in st.session_state:
-    st.session_state.memory_objects = {}
-if "graph" not in st.session_state:
-    st.session_state.graph = None
-if "current_framework" not in st.session_state:
-    st.session_state.current_framework = None
-if "current_user" not in st.session_state:
-    st.session_state.current_user = None
-if "processing" not in st.session_state:
-    st.session_state.processing = False
+def clear_memory(framework: str, user_id: str):
+    """Clear memory for a specific user in a framework."""
+    framework = framework.lower()
 
-# ── SIDEBAR ────────────────────────────────────────────────────────────────
+    if framework == "langmem":
+        from memory.langmem_memory import delete_all_memories, get_langmem_store
+
+        store = get_langmem_store()
+        delete_all_memories(store, user_id)
+        print(f"[DEBUG] Cleared langmem SQLite for user {user_id}")
+
+    elif framework == "mem0":
+        from memory.mem0_memory import get_mem0
+
+        mem0_instance = get_mem0()
+        mem0_instance.delete_all(user_id=user_id)  # Mem0's built-in delete method
+        print(f"[DEBUG] Cleared mem0 for user {user_id}")
+
+    # Clear session state object
+    if framework in st.session_state.memory_objects:
+        del st.session_state.memory_objects[framework]
+
+    print(f"[DEBUG] ✓ Memory cleared for framework: {framework}, user: {user_id}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SESSION STATE INITIALIZATION
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def init_session_state():
+    """Initialize all session state variables."""
+    defaults = {
+        "messages": [],
+        "memory_objects": {},
+        "graph": None,
+        "current_framework": None,
+        "current_user": None,
+        "processing": False,
+        "rag_loaded": False,
+    }
+
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+
+init_session_state()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# RAG MANAGEMENT
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def build_rag_index() -> Tuple[bool, str]:
+    """Build RAG index from PDFs."""
+    try:
+        docs = load_pdfs()
+        if not docs:
+            return False, "No PDFs found in ./data folder"
+
+        chunks = chunk_documents(docs)
+        build_index(chunks)
+        st.session_state.rag_loaded = True
+        return True, f"Successfully indexed {len(chunks)} chunks"
+
+    except Exception as e:
+        return False, f"Error building index: {str(e)}"
+
+
+def check_rag_status() -> Tuple[bool, int]:
+    """Check if RAG index is loaded."""
+    try:
+        index, texts, sources = load_index()
+        if index is not None:
+            return True, index.ntotal
+        return False, 0
+    except Exception:
+        return False, 0
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SIDEBAR UI
+# ═══════════════════════════════════════════════════════════════════════════
+
 with st.sidebar:
     st.title("🏥 Healthcare RAG")
     st.divider()
 
-    # Framework selector
+    # ─── Framework Selection ───────────────────────────────────────────────
     st.subheader("Memory Framework")
     framework = st.selectbox(
-        "Select framework:", ["Mem0", "LangMem"], key="framework_select"
+        "Select framework:",
+        ["Mem0", "LangMem"],
+        key="framework_select",
+        on_change=reset_chat_ui,
+        help="Choose the memory backend for storing clinical context",
     )
 
-    # User selector
-    st.subheader("User")
+    # ─── User Selection ────────────────────────────────────────────────────
+    st.subheader("User Profile")
     user_key = st.selectbox(
         "Select user:",
         list(USERS.keys()),
         format_func=lambda x: USERS[x]["name"],
         key="user_select",
+        on_change=reset_chat_ui,
+        help="Select which healthcare professional you are",
     )
+
     user = USERS[user_key]
-
     st.info(f"""
-    **{user["name"]}**
+    **{user["name"]}**  
     {user["role"]}
-
-    *Style:* {user["style"]}
+    
+    *Communication Style:* {user["style"]}
     """)
 
     st.divider()
 
-    # Data setup
-    st.subheader("Setup")
+    # ─── RAG Index Management ──────────────────────────────────────────────
+    st.subheader("📚 RAG Index")
 
-    if st.button("📚 Build RAG Index", use_container_width=True):
-        with st.spinner("Loading and indexing PDFs..."):
-            docs = load_pdfs()
-            if docs:
-                chunks = chunk_documents(docs)
-                build_index(chunks)
-                st.success(f"Indexed {len(chunks)} chunks!")
+    if st.button("Build Index from PDFs", use_container_width=True):
+        with st.spinner("Loading and indexing documents..."):
+            success, message = build_rag_index()
+            if success:
+                st.success(message)
             else:
-                st.error("No PDFs found in ./data folder")
+                st.error(message)
 
-    index, texts, sources = load_index()
-    if index is not None:
-        st.success(f"✅ RAG index loaded ({index.ntotal} vectors)")
+    # Check RAG status
+    rag_loaded, vector_count = check_rag_status()
+    if rag_loaded:
+        st.success(f"✅ Index ready ({vector_count:,} vectors)")
     else:
-        st.warning("⚠️ No RAG index. Click Build above.")
+        st.warning("⚠️ No index found. Build one above.")
 
     st.divider()
 
-    # Memory viewer
+    # ─── Memory Viewer ─────────────────────────────────────────────────────
     st.subheader("🧠 Memory Store")
 
-    memories = get_all_memories_for_user(
-        framework.lower(), user_key, st.session_state.memory_objects
+    with st.expander("View Stored Memories", expanded=False):
+        memories = get_all_memories(framework.lower(), user_key)
+
+        if memories:
+            for i, mem in enumerate(memories, 1):
+                st.markdown(f"{i}. {mem}")
+        else:
+            st.info("No memories stored yet.")
+
+    # ─── Actions ───────────────────────────────────────────────────────────
+    st.divider()
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        if st.button("🗑️ Clear Chat", use_container_width=True):
+            st.session_state.messages = []
+            st.success("Chat cleared!")
+            print("[DEBUG] Cleared chat history")
+            st.rerun()
+
+    with col2:
+        if st.button("♻️ Reset Memory", use_container_width=True):
+            clear_memory(framework.lower(), user_key)  # Pass user_key!
+            st.success(f"Memory cleared for {USERS[user_key]['name']}!")
+            st.rerun()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# GRAPH MANAGEMENT
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def should_rebuild_graph(framework: str, user_key: str) -> bool:
+    """Check if graph needs rebuilding."""
+    fw_key = framework.lower()
+    return (
+        st.session_state.graph is None
+        or st.session_state.current_framework != fw_key
+        or st.session_state.current_user != user_key
     )
 
-    if memories:
-        for m in memories:
-            st.markdown(f"- {m}")
-    else:
-        st.info("No memories stored yet.")
 
-    if st.button("🗑️ Clear chat", use_container_width=True):
-        st.session_state.messages = []
-        st.rerun()
+def rebuild_graph(framework: str, user_key: str):
+    """Rebuild the agent graph with current configuration."""
+    fw_key = framework.lower()
 
-# ── REBUILD GRAPH IF FRAMEWORK OR USER CHANGES ────────────────────────────
-fw_key = framework.lower()
-if (
-    st.session_state.current_framework != fw_key
-    or st.session_state.current_user != user_key
-):
-    # Clear all old memory objects
-    st.session_state.memory_objects = {}
-
-    # Setup new memory for the selected framework and user
+    # Setup memory functions
     retrieve_fn, persist_fn = setup_memory(fw_key, user_key)
 
-    # Rebuild the graph with fresh memory
+    # Build graph
     st.session_state.graph = build_graph(retrieve_fn, persist_fn)
 
-    # Update current framework/user
+    # Update current state
     st.session_state.current_framework = fw_key
     st.session_state.current_user = user_key
-    st.session_state.messages = []
 
-# ── MAIN CHAT UI ───────────────────────────────────────────────────────────
+
+# Rebuild graph if needed
+if should_rebuild_graph(framework, user_key):
+    rebuild_graph(framework, user_key)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# MAIN CHAT INTERFACE
+# ═══════════════════════════════════════════════════════════════════════════
+
 st.title(f"🏥 Healthcare Assistant — {framework}")
-st.caption(f"Logged in as: **{user['name']}** | {user['role']}")
+st.caption(f"Logged in as: **{user['name']}** ({user['role']})")
 st.divider()
 
-# Display chat history
+# ─── Display Chat History ──────────────────────────────────────────────────
+
 for msg in st.session_state.messages:
-    role = "user" if msg["role"] == "user" else "assistant"
-    with st.chat_message(role):
+    with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# 1. Capture the input
+
+# ─── Chat Input ────────────────────────────────────────────────────────────
+
 prompt = st.chat_input(
     "Ask a clinical question...",
-    disabled=st.session_state.processing,  # This will now be TRUE when it reruns
+    disabled=st.session_state.processing,
 )
 
 if prompt:
-    # 2. IMMEDIATELY lock and rerun to gray out the bar
-    st.session_state.processing = True
+    # Add user message and lock UI
     st.session_state.messages.append({"role": "user", "content": prompt})
+    st.session_state.processing = True
     st.rerun()
 
-# 3. If we are processing, run the graph logic
+
+# ─── Process Pending Message ───────────────────────────────────────────────
+
 if st.session_state.processing and st.session_state.messages:
-    # Get the last message
+    # Get the last user message
     last_user_msg = st.session_state.messages[-1]["content"]
 
-    with st.chat_message("assistant"):
-        config = {
-            "configurable": {
-                "thread_id": f"{user_key}_{fw_key}_thread",
-                "user_id": user_key,
-            }
+    # Configuration for the graph
+    config = {
+        "configurable": {
+            "thread_id": f"{user_key}_{framework.lower()}_thread",
+            "user_id": user_key,
         }
+    }
+
+    # Display assistant response
+    with st.chat_message("assistant"):
         placeholder = st.empty()
         full_response = ""
 
-        with st.spinner("Processing and updating memory..."):
-            for chunk in st.session_state.graph.stream(
-                {
-                    "messages": [HumanMessage(content=last_user_msg.strip())],
-                    "user_id": user_key,
-                    "user_name": user["name"],
-                },
-                config=config,
-                stream_mode="messages",
-            ):
-                message_chunk, metadata = chunk
+        try:
+            with st.spinner("🤖 Thinking..."):
+                # Stream response from graph
+                for chunk in st.session_state.graph.stream(
+                    {
+                        "messages": [last_user_msg],
+                        "user_id": user_key,
+                        "user_name": USERS[user_key]["name"],
+                    },
+                    config,
+                ):
+                    # Parse LangGraph chunk structure
+                    # print(f"[DEBUG] Received chunk with nodes: {list(chunk.keys())}")
 
-                if metadata.get("langgraph_node") == "agent":
-                    # Extract the text content from the message
-                    content = getattr(message_chunk, "content", "")
+                    for node_name, node_output in chunk.items():
+                        print(f"[DEBUG] Processing node: {node_name}")
 
-                # ── AGGRESSIVE GUARD: Block JSON and internal Memory Logs ──
-                # If the chunk contains JSON brackets OR the LangMem internal tags, skip it.
-                forbidden_markers = ["{", "}", '"facts"', '"decision"', "[LangMem]"]
+                        if node_name in ["agent", "non_medical"]:
+                            # Extract content from various possible structures
+                            content = ""
 
-                if any(marker in content for marker in forbidden_markers):
-                    print(f"DEBUG: Blocked background logic leak: {content.strip()}")
-                    continue
+                            # print(f"[DEBUG] Raw node_output type: {type(node_output)}")
+                            # print(f"[DEBUG] Raw node_output: {node_output}")
 
-                    # If it's real text, add it to the UI
-                if content:
-                    full_response += content
-                    placeholder.markdown(full_response + "▌")
+                            # Handle dict with 'messages' key (your actual structure)
+                            if (
+                                isinstance(node_output, dict)
+                                and "messages" in node_output
+                            ):
+                                messages = node_output["messages"]
+                                content = (
+                                    messages[-1]
+                                    if isinstance(messages, list)
+                                    else messages
+                                )
+                                # print(
+                                #     f"[DEBUG] Found messages key, type: {type(messages)}, value: {messages}"
+                                # )
+                                # Messages could be a list or a single item
+                                if isinstance(messages, list):
+                                    # Join all messages or take the last one
+                                    content = messages[-1] if messages else ""
+                                    # print(f"[DEBUG] Extracted from list: {content}")
+                                else:
+                                    content = messages
+                                    # print(f"[DEBUG] Extracted direct: {content}")
+                            # Handle message objects with content attribute
+                            elif hasattr(node_output, "content"):
+                                content = node_output.content
+                                # print(f"[DEBUG] Extracted from .content: {content}")
+                            # Handle dict with 'content' key
+                            elif (
+                                isinstance(node_output, dict)
+                                and "content" in node_output
+                            ):
+                                content = node_output["content"]
+                                # print(f"[DEBUG] Extracted from ['content']: {content}")
+                            # Handle raw strings
+                            elif isinstance(node_output, str):
+                                content = node_output
+                                # print(f"[DEBUG] Direct string: {content}")
+                            else:
+                                # Fallback: convert to string
+                                content = str(node_output)
+                                # print(f"[DEBUG] Fallback str(): {content}")
 
-        # 4. Finalize
-        placeholder.markdown(full_response)
-        st.toast("Clinical memory updated!", icon="🧠")
+                            # Debug: Log what we're receiving
+                            # print(
+                            #     f"[DEBUG] Final extracted content type: {type(content)}"
+                            # )
+                            # print(f"[DEBUG] Final extracted content: {content}")
 
-        # Save response and UNLOCK
-        st.session_state.messages.append(
-            {"role": "assistant", "content": full_response}
-        )
-        st.session_state.processing = False
-        st.rerun()  # Refresh to clear the spinner and re-enable input
+                            # Filter out internal JSON/logging artifacts
+                            # Only block content that looks like raw JSON memory dumps
+                            is_memory_log = isinstance(content, str) and (
+                                content.strip().startswith("[LangMem]")
+                                or content.strip().startswith("[Mem0]")
+                                or (
+                                    content.strip().startswith("{")
+                                    and '"facts"' in content
+                                )
+                                or (
+                                    content.strip().startswith("{")
+                                    and '"decision"' in content
+                                )
+                            )
+
+                            if is_memory_log:
+                                # Skip internal memory processing logs
+                                # print("[DEBUG] FILTERED as memory log")
+                                continue
+
+                            # Append valid content
+                            if content and isinstance(content, str) and content.strip():
+                                # print(f"[DEBUG] ADDING to response: {content[:100]}")
+                                full_response += content
+                                placeholder.markdown(full_response + "▌")
+                            else:
+                                print("[DEBUG] SKIPPED - empty or not string")
+
+            # Finalize display
+            placeholder.markdown(full_response)
+
+            # Persist conversation to memory
+            retrieve_fn, persist_fn = setup_memory(framework.lower(), user_key)
+            persist_fn(last_user_msg, full_response, user_key)
+
+            # Show success notification
+            st.toast("✅ Memory updated", icon="🧠")
+
+            # Save assistant response
+            st.session_state.messages.append(
+                {"role": "assistant", "content": full_response}
+            )
+
+        except Exception as e:
+            # Display error to user (keep visible, don't auto-hide)
+            st.error("❌ **Error processing request**")
+            st.error(f"**Error:** {str(e)}")
+
+            with st.expander("Full Stack Trace", expanded=True):
+                st.code(traceback.format_exc())
+
+            # DON'T remove the user message - keep it for debugging
+            # We want to see what caused the error
+
+            st.warning(
+                "⚠️ Check the error above. You can retry by sending a new message."
+            )
+
+            # Mark that we had an error
+            error_occurred = True
+
+        else:
+            # No error occurred
+            error_occurred = False
+
+        finally:
+            # Always unlock the UI
+            st.session_state.processing = False
+            # Only rerun if successful (no error)
+            if not error_occurred:
+                st.rerun()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# FOOTER
+# ═══════════════════════════════════════════════════════════════════════════
+
+st.divider()
+st.caption(
+    "💡 This assistant uses RAG + intelligent memory to provide clinical insights"
+)

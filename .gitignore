@@ -5,3 +5,6 @@ __pycache__/
 *.pyd
 
 venv/
+data/evaluation_results/
+data/memory_stores/
+data/rag_index/
