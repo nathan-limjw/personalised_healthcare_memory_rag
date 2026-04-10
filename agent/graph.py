@@ -5,6 +5,7 @@ import re
 import sqlite3
 from typing import Literal
 
+import streamlit as st
 from langchain_core.messages import SystemMessage
 from langchain_ollama import ChatOllama
 from langgraph.checkpoint.sqlite import SqliteSaver
@@ -12,6 +13,10 @@ from langgraph.graph import END, START, StateGraph
 
 from agent.state import AgentState, RelevanceOutput
 from config import OLLAMA_BASE_URL, OLLAMA_MODEL, SQLITE_DB_PATH, USERS
+from memory.langmem_memory import get_langmem_store
+from memory.langmem_memory import search_memory as langmem_search
+from memory.mem0_memory import get_mem0
+from memory.mem0_memory import search_memory as mem0_search
 from rag.vectorstore import load_index, retrieve
 
 # Load RAG index once
@@ -172,6 +177,15 @@ def make_agent_node(memory_retrieve_fn, memory_persist_fn):
         # ── RETRIEVE MEMORIES ──────────────────────────────────────
         raw_memories = memory_retrieve_fn(user_message, user_id)
 
+        # print(f"[DEBUG MEMORY] Query: {user_message}")
+        # print(f"[DEBUG MEMORY] Retrieved memories: {raw_memories}")
+        # print(
+        #     f"[DEBUG MEMORY] Memory count: {len(raw_memories) if isinstance(raw_memories, list) else 'not a list'}"
+        # )
+
+        memory_context = format_memory_context(raw_memories)
+        # print(f"[DEBUG MEMORY] Formatted context: {memory_context[:200]}")
+
         # ✨ Format memories uniformly regardless of source
         memory_context = format_memory_context(raw_memories)
 
@@ -291,28 +305,38 @@ def non_medical_node(state: AgentState):
     default_style = user_profile.get("style", "")
     role = user_profile.get("role", "healthcare professional")
 
-    # Get recent conversation context (last 3-5 exchanges)
-    recent_context = ""
-    if len(state["messages"]) > 1:
-        recent_msgs = state["messages"][-6:-1]  # Last 5 messages before current
-        recent_context = "\n".join(
-            [msg.content for msg in recent_msgs[-3:]]
-        )  # Last 3 for brevity
+    # Get the memory retrieval function based on framework
+    framework = st.session_state.get("framework", "langmem").lower()
+
+    if framework == "langmem":
+        store = get_langmem_store()
+        memories = langmem_search(store, user_message, user_id, limit=5)
+    else:  # mem0
+        mem0_instance = get_mem0(user_id)
+        memories = mem0_search(mem0_instance, user_message, user_id, limit=5)
+
+    # Format memory context
+    memory_context = (
+        "\n".join([f"- {m}" for m in memories])
+        if memories
+        else "No prior clinical discussions"
+    )
 
     # Build contextual prompt
     prompt = f"""You are a clinical assistant speaking to {user_name}, a {role}.
 
-Recent conversation context:
-{recent_context if recent_context else "First interaction"}
+What you remember about this user:
+{memory_context}
 
 Current question: "{user_message}"
 
 This question is not clinical/medical. Respond warmly but redirect:
-1. Acknowledge their question (show you understood the context from conversation)
-2. Politely explain you can only help with clinical questions from authorized guidelines
-3. If the recent conversation mentioned any clinical topics, offer to help with those
+1. If memories show recent clinical topics, acknowledge them naturally
+2. Politely explain you can only help with clinical questions from guidelines
+3. Offer to help with any clinical topics from memory
+4. **IMPORTANT**: If memory shows NO prior clinical topics, you MUST say you don't know what they're referring to. Do NOT guess or make assumptions.
 
-IMPORTANT - Match this style: {default_style}
+Style: {default_style}
 
 Keep response natural and brief."""
 

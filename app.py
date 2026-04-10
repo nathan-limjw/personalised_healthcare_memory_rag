@@ -10,6 +10,8 @@ import streamlit as st
 
 from agent.graph import build_graph
 from config import USERS
+from memory.langmem_memory import get_langmem_store
+from memory.mem0_memory import get_mem0
 from rag.loader import chunk_documents, load_pdfs
 from rag.vectorstore import build_index, load_index
 
@@ -44,7 +46,7 @@ def reset_chat_ui():
 
 def initialize_mem0(user_key: str):
     """Initialize Mem0 memory backend."""
-    from memory.mem0_memory import add_memory, get_mem0, search_memory
+    from memory.mem0_memory import add_memory, search_memory
 
     mem = get_mem0(user_key)
 
@@ -67,7 +69,7 @@ def initialize_mem0(user_key: str):
 def initialize_langmem(user_key: str):
     """Initialize LangMem memory backend."""
     from memory.langmem_intelligence import intelligent_persist
-    from memory.langmem_memory import get_langmem_store, search_memory
+    from memory.langmem_memory import search_memory
 
     store = get_langmem_store()
 
@@ -165,11 +167,29 @@ def get_all_memories(framework: str, user_id: str) -> List[str]:
     return []
 
 
-def clear_memory(framework: str):
-    """Clear memory objects for a framework."""
+def clear_memory(framework: str, user_id: str):
+    """Clear memory for a specific user in a framework."""
     framework = framework.lower()
+
+    if framework == "langmem":
+        from memory.langmem_memory import delete_all_memories, get_langmem_store
+
+        store = get_langmem_store()
+        delete_all_memories(store, user_id)
+        print(f"[DEBUG] Cleared langmem SQLite for user {user_id}")
+
+    elif framework == "mem0":
+        from memory.mem0_memory import get_mem0
+
+        mem0_instance = get_mem0()
+        mem0_instance.delete_all(user_id=user_id)  # Mem0's built-in delete method
+        print(f"[DEBUG] Cleared mem0 for user {user_id}")
+
+    # Clear session state object
     if framework in st.session_state.memory_objects:
         del st.session_state.memory_objects[framework]
+
+    print(f"[DEBUG] ✓ Memory cleared for framework: {framework}, user: {user_id}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -308,12 +328,14 @@ with st.sidebar:
     with col1:
         if st.button("🗑️ Clear Chat", use_container_width=True):
             st.session_state.messages = []
+            st.success("Chat cleared!")
+            print("[DEBUG] Cleared chat history")
             st.rerun()
 
     with col2:
         if st.button("♻️ Reset Memory", use_container_width=True):
-            clear_memory(framework.lower())
-            st.success("Memory cleared!")
+            clear_memory(framework.lower(), user_key)  # Pass user_key!
+            st.success(f"Memory cleared for {USERS[user_key]['name']}!")
             st.rerun()
 
 
