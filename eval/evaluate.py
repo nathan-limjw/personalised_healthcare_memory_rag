@@ -9,9 +9,38 @@ import pandas as pd
 import psutil
 from langchain_core.messages import HumanMessage
 
-from agent.graph import build_graph
+from agent import graph_with_qwen
+from agent.graph_with_qwen import build_graph
 from app import setup_memory
-from config import EXCEL_PATH, PERSISTENT_CSV, USERS
+from config import EXCEL_PATH, PERSISTENT_CSV, RAG_INDEX_DIR, USERS
+from rag.loader import chunk_documents, load_pdfs
+from rag.vectorstore import build_index, load_index
+
+
+def ensure_rag_index():
+    """Build RAG index if it doesn't exist."""
+    index_path = os.path.join(RAG_INDEX_DIR, "index.faiss")
+
+    if os.path.exists(index_path):
+        print("✅ RAG index already exists, skipping build")
+        return
+
+    print("📚 RAG index not found, building now...")
+    print("Step 1: Loading PDFs...")
+    documents = load_pdfs()
+
+    if not documents:
+        print("⚠️  No PDFs found! Continuing without RAG...")
+        return
+
+    print("Step 2: Chunking documents...")
+    chunks = chunk_documents(documents)
+
+    print("Step 3: Building FAISS index (this may take a while)...")
+    build_index(chunks)
+
+    print("✅ RAG index built successfully!\n")
+
 
 # ══════════════════════════════════════════════════════════════
 # IMPROVED EVALUATION METRICS
@@ -490,6 +519,17 @@ def _classify_test_type(test: Dict) -> str:
 def run_comprehensive_evaluation_from_excel(excel_path=EXCEL_PATH):
     """Run evaluation on tests listed in Excel with memory management and checkpointing."""
 
+    # BUILD RAG INDEX FIRST
+    ensure_rag_index()
+
+    (
+        graph_with_qwen.rag_index,
+        graph_with_qwen.rag_texts,
+        graph_with_qwen.rag_sources,
+    ) = load_index()
+
+    print(f"✅ RAG index loaded: {graph_with_qwen.rag_index is not None}")
+
     process = psutil.Process(os.getpid())
 
     # Load Excel
@@ -538,9 +578,7 @@ def run_comprehensive_evaluation_from_excel(excel_path=EXCEL_PATH):
         # ─────────────────────────────
         t0 = time.time()
 
-        retrieve_fn, persist_fn = setup_memory(
-            test["framework"], test["user"]
-        )
+        retrieve_fn, persist_fn = setup_memory(test["framework"], test["user"])
         graph = build_graph(retrieve_fn, persist_fn)
 
         t1 = time.time()
@@ -564,24 +602,8 @@ def run_comprehensive_evaluation_from_excel(excel_path=EXCEL_PATH):
             }
         }
 
-        # signal.alarm(60)
-
         try:
-            # 🔥 STREAM to see where it stalls
             start_time = time.time()
-
-            for step in graph.stream(
-                {
-                    "messages": [HumanMessage(content=test["question"])],
-                    "user_id": test["user"],
-                    "user_name": USERS.get(test["user"], {}).get("name", test["user"]),
-                },
-                config=config,
-            ):
-                step_name = list(step.keys())[0]
-                print(f"      → Node executed: {step_name}")
-
-            # Use ThreadPoolExecutor for timeout
             with ThreadPoolExecutor(max_workers=1) as executor:
                 future = executor.submit(
                     graph.invoke,
@@ -592,13 +614,13 @@ def run_comprehensive_evaluation_from_excel(excel_path=EXCEL_PATH):
                             "name", test["user"]
                         ),
                     },
-                    config=config,  # Pass the same config for consistency
+                    config=config,
                 )
                 try:
-                    graph_response = future.result(timeout=60)  # 60-second timeout
+                    graph_response = future.result(timeout=500)
                 except TimeoutError:
                     print("   ⏰ TIMEOUT during graph execution")
-                    graph_response = "TIMEOUT"
+                    graph_response = {"messages": ["TIMEOUT"]}
 
             response_time = time.time() - start_time
 
