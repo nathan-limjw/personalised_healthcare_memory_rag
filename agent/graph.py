@@ -6,12 +6,12 @@ import sqlite3
 from typing import Literal
 
 import streamlit as st
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import SystemMessage
 from langchain_ollama import ChatOllama
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 
-from agent.state import AgentState
+from agent.state import AgentState, RelevanceOutput
 from config import OLLAMA_BASE_URL, OLLAMA_MODEL, SQLITE_DB_PATH, USERS
 from memory.langmem_memory import get_langmem_store
 from memory.langmem_memory import search_memory as langmem_search
@@ -83,7 +83,6 @@ def format_memory_context(memories):
 
 # -------------------------------------------------------------------------------------
 def relevance_node(state: AgentState):
-    from agent.state import RelevanceOutput
     user_message = state["messages"][-1]
     structured_llm = llm.with_structured_output(RelevanceOutput)
     system_prompt = """
@@ -101,48 +100,11 @@ def relevance_node(state: AgentState):
     return {"relevance": response.relevance, "reason": response.reason}
 
 
-# -------------------------------------------------------------------------------------
-
-
 def router(state: AgentState) -> Literal["agent", "non_medical"]:
     if state["relevance"] == "relevant":
         return "agent"
     else:
         return "non_medical"
-
-### FOR QWEN
-
-
-# -------------------------------------------------------------------------------------
-# def relevance_node(state: AgentState):
-#     user_message = state["messages"][-1].content
-
-#     # Simple, high-instruction prompt for small models
-#     system_prompt = """
-#     Classify the user message. 
-#     If it is about medical topics, clinical guidelines, or formatting requests, reply ONLY with the word 'relevant'.
-#     Otherwise, reply ONLY with the word 'irrelevant'.
-    
-#     Message: """
-
-#     # Use standard invoke instead of structured output
-#     response = llm.invoke(
-#         [SystemMessage(content=system_prompt), HumanMessage(content=user_message)]
-#     )
-
-#     # Clean the response
-#     result = response.content.lower().strip()
-
-#     # Robust check for the 4B model's output
-#     is_relevant = "relevant" in result and "irrelevant" not in result
-
-#     return {
-#         "relevance": "relevant" if is_relevant else "irrelevant",
-#         "reason": "Direct classification",
-#     }
-
-
-# -------------------------------------------------------------------------------------
 
 
 def make_agent_node(memory_retrieve_fn, memory_persist_fn):
