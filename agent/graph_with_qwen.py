@@ -24,7 +24,11 @@ rag_index, rag_texts, rag_sources = load_index()
 
 os.environ["OLLAMA_USE_GPU"] = "0"
 
-llm = ChatOllama(model=OLLAMA_MODEL, base_url=OLLAMA_BASE_URL, temperature=0)
+llm = ChatOllama(
+    model=OLLAMA_MODEL,
+    base_url=OLLAMA_BASE_URL,
+    temperature=0,
+)
 
 
 def format_memory_context(memories):

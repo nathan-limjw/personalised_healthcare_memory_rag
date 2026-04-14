@@ -7,6 +7,7 @@ from typing import Dict, List
 
 import pandas as pd
 import psutil
+import torch
 from langchain_core.messages import HumanMessage
 
 from agent import graph_with_qwen
@@ -604,28 +605,26 @@ def run_comprehensive_evaluation_from_excel(excel_path=EXCEL_PATH):
 
         try:
             start_time = time.time()
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(
-                    graph.invoke,
-                    {
-                        "messages": [HumanMessage(content=test["question"])],
-                        "user_id": test["user"],
-                        "user_name": USERS.get(test["user"], {}).get(
-                            "name", test["user"]
-                        ),
-                    },
-                    config=config,
-                )
-                try:
-                    graph_response = future.result(timeout=1000)
-                except TimeoutError:
-                    print("   ⏰ TIMEOUT during graph execution")
-                    graph_response = {"messages": ["TIMEOUT"]}
 
-                    try: 
-                        executor.shutdown(wait=False, cancel_futures=True)
-                    except:
-                        pass
+            executor = ThreadPoolExecutor(max_workers=1)
+            future = executor.submit(
+                graph.invoke,
+                {
+                    "messages": [HumanMessage(content=test["question"])],
+                    "user_id": test["user"],
+                    "user_name": USERS.get(test["user"], {}).get("name", test["user"]),
+                },
+                config=config,
+            )
+
+            try:
+                graph_response = future.result(timeout=500)
+            except TimeoutError:
+                print("   ⏰ TIMEOUT during graph execution")
+                graph_response = {"messages": ["TIMEOUT"]}
+            finally:
+                # 2. Force the executor to shut down WITHOUT waiting for the stuck thread
+                executor.shutdown(wait=False, cancel_futures=True)
 
             response_time = time.time() - start_time
 
@@ -708,6 +707,10 @@ def run_comprehensive_evaluation_from_excel(excel_path=EXCEL_PATH):
         # -------------------------
         del assistant_text, graph, retrieve_fn, persist_fn
         gc.collect()
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         print(
             f"   Memory after cleanup: {process.memory_info().rss / 1024**2:.2f} MB\n"
         )
