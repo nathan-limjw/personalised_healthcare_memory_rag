@@ -8,7 +8,7 @@ from typing import Dict, List
 import pandas as pd
 import psutil
 import torch
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, AIMessage
 
 from agent import graph_with_qwen
 from agent.graph_with_qwen import build_graph
@@ -621,7 +621,7 @@ def run_comprehensive_evaluation_from_excel(excel_path=EXCEL_PATH):
                 graph_response = future.result(timeout=500)
             except TimeoutError:
                 print("   ⏰ TIMEOUT during graph execution")
-                graph_response = {"messages": ["TIMEOUT"]}
+                graph_response = {"messages": [AIMessage(content="TIMEOUT")]}
             finally:
                 # 2. Force the executor to shut down WITHOUT waiting for the stuck thread
                 executor.shutdown(wait=False, cancel_futures=True)
@@ -697,6 +697,7 @@ def run_comprehensive_evaluation_from_excel(excel_path=EXCEL_PATH):
         # ─────────────────────────────
         # 5. Debug timing
         # ─────────────────────────────
+        print("STATISTICS OF RUN:")
         print(f"   Setup: {t1 - t0:.2f}s")
         print(f"   Memory load: {t2 - t1:.2f}s")
         print(f"   Invoke: {t3 - t2:.2f}s")
