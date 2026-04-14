@@ -25,7 +25,11 @@ rag_index, rag_texts, rag_sources = load_index()
 os.environ["OLLAMA_USE_GPU"] = "0"
 
 llm = ChatOllama(
-    model=OLLAMA_MODEL, base_url=OLLAMA_BASE_URL, temperature=0, num_ctx=8192
+    model=OLLAMA_MODEL,
+    base_url=OLLAMA_BASE_URL,
+    temperature=0,
+    num_ctx=8192,
+    additional_kwargs={"keep_alive": 0},
 )
 
 

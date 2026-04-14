@@ -8,7 +8,7 @@ from typing import Dict, List
 import pandas as pd
 import psutil
 import torch
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
 from agent import graph_with_qwen
 from agent.graph_with_qwen import build_graph
