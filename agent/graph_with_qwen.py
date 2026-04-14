@@ -92,6 +92,7 @@ def router(state: AgentState) -> Literal["agent", "non_medical"]:
 ### FOR QWEN
 # -------------------------------------------------------------------------------------
 def relevance_node(state: AgentState):
+    print("[RELEVANCE] Checking relevance of query")
     user_message = state["messages"][-1].content
 
     # Simple, high-instruction prompt for small models
@@ -109,6 +110,7 @@ def relevance_node(state: AgentState):
 
     # Clean the response
     result = response.content.lower().strip()
+    print(f"[RELEVANCE] Relevance Determined: {result}")
 
     # Robust check for the 4B model's output
     is_relevant = "relevant" in result and "irrelevant" not in result
