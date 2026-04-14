@@ -617,10 +617,15 @@ def run_comprehensive_evaluation_from_excel(excel_path=EXCEL_PATH):
                     config=config,
                 )
                 try:
-                    graph_response = future.result(timeout=500)
+                    graph_response = future.result(timeout=1000)
                 except TimeoutError:
                     print("   ⏰ TIMEOUT during graph execution")
                     graph_response = {"messages": ["TIMEOUT"]}
+
+                    try: 
+                        executor.shutdown(wait=False, cancel_futures=True)
+                    except:
+                        pass
 
             response_time = time.time() - start_time
 
