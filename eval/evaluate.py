@@ -1,20 +1,67 @@
 import gc
-import multiprocessing
+import logging
 import os
 import re
 import time
+from multiprocessing import Process, Queue, set_start_method
 from typing import Dict, List
 
 import pandas as pd
 import psutil
 import torch
-from langchain_core.messages import AIMessage
+from langchain_core.messages import HumanMessage
 
 from agent import graph_with_qwen
+from agent.graph_with_qwen import build_graph
 from app import setup_memory
 from config import EXCEL_PATH, PERSISTENT_CSV, RAG_INDEX_DIR, USERS
 from rag.loader import chunk_documents, load_pdfs
 from rag.vectorstore import build_index, load_index
+
+# ══════════════════════════════════════════════════════════════
+# SUPPRESS STREAMLIT WARNINGS AND ERRORS
+# ══════════════════════════════════════════════════════════════
+
+
+def suppress_streamlit_output():
+    """Suppress Streamlit's annoying terminal output."""
+
+    # Suppress Streamlit logs
+    logging.getLogger("streamlit").setLevel(logging.ERROR)
+    logging.getLogger("streamlit.runtime").setLevel(logging.ERROR)
+    logging.getLogger("streamlit.watcher").setLevel(logging.ERROR)
+    logging.getLogger("streamlit.server").setLevel(logging.ERROR)
+
+    # Redirect Streamlit stderr/stdout
+    try:
+        import streamlit as st
+
+        # Disable Streamlit's logger
+        st.logger.get_logger = lambda name: logging.getLogger(name)
+    except ImportError:
+        pass  # Streamlit not installed, no problem
+
+    # Also suppress warnings
+    import warnings
+
+    warnings.filterwarnings("ignore", category=UserWarning)
+    warnings.filterwarnings("ignore", category=FutureWarning)
+    warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+
+# Call this at the very start
+suppress_streamlit_output()
+
+
+# ══════════════════════════════════════════════════════════════
+# TIMEOUT HANDLING FOR WINDOWS
+# ══════════════════════════════════════════════════════════════
+
+
+class TestTimeoutError(Exception):
+    """Custom timeout exception for clearer error handling."""
+
+    pass
 
 
 def ensure_rag_index():
@@ -276,6 +323,7 @@ def evaluate_refusal_quality(response: str, test_case: Dict) -> Dict:
     """
     should_refuse = test_case.get("should_refuse", False)
     is_off_topic = test_case.get("is_off_topic", False)
+    is_memory_test = test_case.get("is_memory_test", False)
 
     # Refusal indicators - expanded to match actual agent responses
     refusal_indicators = [
@@ -495,52 +543,200 @@ def _classify_test_type(test: Dict) -> str:
 
 
 # ══════════════════════════════════════════════════════════════
-# WINDOWS MULTIPROCESSING WORKER
+# ISOLATED TEST RUNNER - WINDOWS VERSION WITH MULTIPROCESSING
 # ══════════════════════════════════════════════════════════════
-def invoke_graph_worker(
-    test_dict: dict, config: dict, user_name: str, return_dict: dict
-):
+
+
+def _run_test_in_process(test: Dict, idx: int, result_queue: Queue):
     """
-    Isolated worker process. Building the graph and DB connections HERE
-    prevents Windows from crashing due to 'PicklingError'.
+    Worker function that runs in a separate process.
+    This allows true timeout and isolation on Windows.
     """
+    # Suppress Streamlit in child process too
+    suppress_streamlit_output()
+
     try:
-        from langchain_core.messages import HumanMessage
+        # Load RAG index in this process
+        (
+            graph_with_qwen.rag_index,
+            graph_with_qwen.rag_texts,
+            graph_with_qwen.rag_sources,
+        ) = load_index()
 
-        from agent.graph_with_qwen import build_graph
-
-        # 1. Setup Memory
-        t0 = time.time()
-        retrieve_fn, persist_fn = setup_memory(
-            test_dict["framework"], test_dict["user"]
-        )
+        # Setup memory
+        retrieve_fn, persist_fn = setup_memory(test["framework"], test["user"])
         graph = build_graph(retrieve_fn, persist_fn)
-        t1 = time.time()
 
-        # 2. Load memory if needed
-        if test_dict.get("is_memory_test"):
-            for msg in test_dict.get("conversation", []):
-                persist_fn(msg, "acknowledged", test_dict["user"])
-        t2 = time.time()
+        # Load memory if needed
+        if test.get("is_memory_test"):
+            for msg in test.get("conversation", []):
+                persist_fn(msg, "acknowledged", test["user"])
 
-        # 3. Prepare input & Invoke
-        inputs = {
-            "messages": [HumanMessage(content=test_dict["question"])],
-            "user_id": test_dict["user"],
-            "user_name": user_name,
+        # Invoke graph
+        config = {
+            "configurable": {
+                "thread_id": f"eval_{test['user']}_{test['framework']}_{idx}",
+                "user_id": test["user"],
+            }
         }
 
-        response = graph.invoke(inputs, config=config)
-        t3 = time.time()
+        start_time = time.time()
 
-        # Store results to pass back to the main process
-        return_dict["response"] = response
-        return_dict["setup_time"] = t1 - t0
-        return_dict["memory_time"] = t2 - t1
-        return_dict["invoke_time"] = t3 - t2
+        graph_response = graph.invoke(
+            {
+                "messages": [HumanMessage(content=test["question"])],
+                "user_id": test["user"],
+                "user_name": USERS.get(test["user"], {}).get("name", test["user"]),
+            },
+            config=config,
+        )
+
+        response_time = time.time() - start_time
+
+        # Extract response
+        if isinstance(graph_response, dict) and "messages" in graph_response:
+            assistant_text = graph_response["messages"][-1].content
+        else:
+            assistant_text = str(graph_response)
+
+        # Send result back to parent process
+        result_queue.put(
+            {
+                "success": True,
+                "response": assistant_text,
+                "response_time": response_time,
+            }
+        )
 
     except Exception as e:
-        return_dict["error"] = str(e)
+        # Send error back to parent process
+        result_queue.put(
+            {
+                "success": False,
+                "response": f"ERROR: {type(e).__name__}: {str(e)}",
+                "response_time": 0,
+            }
+        )
+
+
+def run_single_test_with_timeout(test: Dict, idx: int, df_len: int) -> Dict:
+    """
+    Run a single test with proper timeout using multiprocessing (Windows-compatible).
+    """
+
+    print(f"\n{'=' * 70}")
+    print(f"Running test {idx + 1}/{df_len}: {test['framework']} - {test['user']}")
+    print(f"Question: {test['question'][:80]}...")
+    print(f"{'=' * 70}")
+
+    process_monitor = psutil.Process(os.getpid())
+    print(
+        f"   Memory before test: {process_monitor.memory_info().rss / 1024**2:.2f} MB"
+    )
+
+    result_queue = Queue()
+    assistant_text = ""
+    response_time = 0
+
+    # Create and start the process
+    p = Process(target=_run_test_in_process, args=(test, idx, result_queue))
+    p.start()
+
+    # Wait for result with timeout
+    p.join(timeout=500)  # 500 second timeout
+
+    if p.is_alive():
+        # Process is still running after timeout - kill it
+        print("   ⏰ TIMEOUT after 500 seconds - terminating process")
+        p.terminate()
+        p.join(timeout=5)  # Give it 5 seconds to terminate gracefully
+
+        if p.is_alive():
+            # Force kill if still alive
+            p.kill()
+            p.join()
+
+        assistant_text = "TIMEOUT: Test exceeded 500 second limit"
+        response_time = 500
+
+    else:
+        # Process completed - get result
+        if not result_queue.empty():
+            result_data = result_queue.get()
+
+            if result_data["success"]:
+                assistant_text = result_data["response"]
+                response_time = result_data["response_time"]
+                print(f"✅ Test completed in {response_time:.2f}s")
+            else:
+                assistant_text = result_data["response"]
+                response_time = result_data["response_time"]
+                print(f"   ❌ {assistant_text}")
+        else:
+            assistant_text = "ERROR: Process terminated without returning result"
+            response_time = 0
+            print("   ❌ Process failed silently")
+
+    # Clean up
+    result_queue.close()
+    del p
+    gc.collect()
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    print(
+        f"   Memory after cleanup: {process_monitor.memory_info().rss / 1024**2:.2f} MB"
+    )
+
+    # ─────────────────────────────
+    # Evaluation
+    # ─────────────────────────────
+    accuracy = evaluate_clinical_accuracy(assistant_text, test)
+    refusal = evaluate_refusal_quality(assistant_text, test)
+    safety = evaluate_safety_critical(assistant_text, test)
+    reasoning = evaluate_clinical_reasoning(assistant_text, test)
+    citation = evaluate_source_citation(assistant_text)
+
+    # Compile results
+    result = {
+        "test_id": idx,
+        "user": test["user"],
+        "framework": test["framework"],
+        "question": test["question"],
+        "ground_truth": test.get("ground_truth", "")[:200],
+        "response": assistant_text[:400],
+        "response_time_sec": round(response_time, 2),
+        "factual_recall": accuracy["factual_recall"],
+        "factual_precision": accuracy["factual_precision"],
+        "clinical_value_accuracy": accuracy["clinical_value_accuracy"],
+        "facts_found_count": accuracy["facts_found_count"],
+        "facts_missed_count": accuracy["facts_missed_count"],
+        "facts_found": str(accuracy["facts_found"]),
+        "facts_missed": str(accuracy["facts_missed"]),
+        "harmful_count": accuracy["harmful_count"],
+        "harmful_mentions": str(accuracy["harmful_mentions"]),
+        "should_refuse": refusal["should_refuse"],
+        "did_refuse": refusal["did_refuse"],
+        "refusal_appropriate": refusal["refusal_appropriate"],
+        "is_off_topic_test": refusal["is_off_topic_test"],
+        "is_privacy_test": refusal.get("is_privacy_test", False),
+        "safety_check": safety.get("safety_check"),
+        "violation_count": safety.get("violation_count", 0),
+        "safety_violations": str(safety.get("safety_violations", [])),
+        "clinical_reasoning_score": reasoning.get("clinical_reasoning_score"),
+        "has_reasoning": reasoning.get("has_reasoning"),
+        "mentions_factors": reasoning.get("mentions_factors"),
+        "has_citation": citation["has_citation"],
+        "citation_quality": citation["citation_quality"],
+        "test_type": _classify_test_type(test),
+        "requires_specific_value": test.get("requires_specific_value", False),
+        "safety_critical": test.get("safety_critical", False),
+        "is_memory_test": test.get("is_memory_test", False),
+        "run_timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+    return result
 
 
 # ══════════════════════════════════════════════════════════════
@@ -549,8 +745,9 @@ def invoke_graph_worker(
 
 
 def run_comprehensive_evaluation_from_excel(excel_path=EXCEL_PATH):
-    """Run evaluation on tests listed in Excel with strict Windows process isolation."""
+    """Run evaluation on tests listed in Excel with memory management and checkpointing."""
 
+    # BUILD RAG INDEX FIRST
     ensure_rag_index()
 
     (
@@ -561,8 +758,7 @@ def run_comprehensive_evaluation_from_excel(excel_path=EXCEL_PATH):
 
     print(f"✅ RAG index loaded: {graph_with_qwen.rag_index is not None}")
 
-    process = psutil.Process(os.getpid())
-
+    # Load Excel
     if not os.path.exists(excel_path):
         print(f"❌ Excel file not found: {excel_path}")
         return
@@ -570,21 +766,29 @@ def run_comprehensive_evaluation_from_excel(excel_path=EXCEL_PATH):
     df = pd.read_excel(excel_path)
     results_list = []
 
+    # Ensure checkpoint columns exist
     if "run_status" not in df.columns:
         df["run_status"] = ""
     if "last_run_timestamp" not in df.columns:
         df["last_run_timestamp"] = ""
 
+    print(f"\n{'=' * 70}")
+    print(f"STARTING EVALUATION - {len(df)} total test cases")
+    print(f"{'=' * 70}\n")
+
     for idx, row in df.iterrows():
+        # Skip already completed tests
         if str(row["run_status"]).strip().lower() == "done":
+            print(f"⏭️  Skipping test {idx + 1}/{len(df)} (already completed)")
             continue
 
+        # Build test dict from row
         test = row.to_dict()
         test["framework"] = test.get("framework", "mem0")
         test["user"] = test.get("user", "user1")
         test["question"] = test.get("question", "")
-        test["expected_facts"] = eval(str(test.get("expected_facts", "[]")))
-        test["should_not_mention"] = eval(str(test.get("should_not_mention", "[]")))
+        test["expected_facts"] = eval(test.get("expected_facts", "[]"))
+        test["should_not_mention"] = eval(test.get("should_not_mention", "[]"))
         test["ground_truth"] = test.get("ground_truth", "")
         test["requires_specific_value"] = test.get("requires_specific_value", False)
         test["safety_critical"] = test.get("safety_critical", False)
@@ -595,163 +799,53 @@ def run_comprehensive_evaluation_from_excel(excel_path=EXCEL_PATH):
         test["is_off_topic"] = test.get("is_off_topic", False)
         test["privacy_test"] = test.get("privacy_test", False)
         test["multi_guideline"] = test.get("multi_guideline", False)
-        test["conversation"] = eval(str(test.get("conversation", "[]")))
-        test["acceptable_variations"] = eval(
-            str(test.get("acceptable_variations", "[]"))
-        )
+        test["conversation"] = eval(test.get("conversation", "[]"))
+        test["acceptable_variations"] = eval(test.get("acceptable_variations", "[]"))
 
-        print(f"Running test {idx + 1}/{len(df)}: {test['framework']} - {test['user']}")
-        print(f"   Memory before test: {process.memory_info().rss / 1024**2:.2f} MB")
-
-        # ─────────────────────────────
-        # Process Isolation Setup
-        # ─────────────────────────────
-        config = {
-            "configurable": {
-                "thread_id": f"eval_{test['user']}_{test['framework']}_{idx}",
-                "user_id": test["user"],
-            }
-        }
-
-        user_name = USERS.get(test["user"], {}).get("name", test["user"])
-
-        manager = multiprocessing.Manager()
-        return_dict = manager.dict()
-
-        start_time = time.time()
-
-        # Spawn the isolated worker
-        worker_process = multiprocessing.Process(
-            target=invoke_graph_worker, args=(test, config, user_name, return_dict)
-        )
-
-        worker_process.start()
-
-        # Wait up to 500 seconds for completion
-        worker_process.join(timeout=500)
-
-        # ─────────────────────────────
-        # Timeout & Error Handling
-        # ─────────────────────────────
-        t1_t0, t2_t1, t3_t2 = 0, 0, 0
-
-        if worker_process.is_alive():
-            print(
-                f"   ⏰ TIMEOUT on Case {idx + 1} - Terminating stuck process cleanly."
-            )
-            worker_process.terminate()  # 🚨 Hard Kill OS Level
-            worker_process.join()  # Clean up zombie
-            graph_response = {"messages": [AIMessage(content="TIMEOUT")]}
-        else:
-            if "error" in return_dict:
-                print(f"   ❌ ERROR in worker: {return_dict['error']}")
-                graph_response = {
-                    "messages": [AIMessage(content=f"Error: {return_dict['error']}")]
-                }
-            else:
-                graph_response = return_dict.get(
-                    "response", {"messages": [AIMessage(content="EMPTY RESPONSE")]}
-                )
-                t1_t0 = return_dict.get("setup_time", 0)
-                t2_t1 = return_dict.get("memory_time", 0)
-                t3_t2 = return_dict.get("invoke_time", 0)
-
-        response_time = time.time() - start_time
-
-        if isinstance(graph_response, dict) and "messages" in graph_response:
-            assistant_text = graph_response["messages"][-1].content
-        else:
-            assistant_text = str(graph_response)
-
-        # ─────────────────────────────
-        # Evaluation & Saving
-        # ─────────────────────────────
-        accuracy = evaluate_clinical_accuracy(assistant_text, test)
-        refusal = evaluate_refusal_quality(assistant_text, test)
-        safety = evaluate_safety_critical(assistant_text, test)
-        reasoning = evaluate_clinical_reasoning(assistant_text, test)
-        citation = evaluate_source_citation(assistant_text)
-
-        result = {
-            "test_id": idx,
-            "user": test["user"],
-            "framework": test["framework"],
-            "question": test["question"],
-            "ground_truth": test.get("ground_truth", "")[:200],
-            "response": assistant_text[:400],
-            "response_time_sec": round(response_time, 2),
-            "factual_recall": accuracy["factual_recall"],
-            "factual_precision": accuracy["factual_precision"],
-            "clinical_value_accuracy": accuracy["clinical_value_accuracy"],
-            "facts_found_count": accuracy["facts_found_count"],
-            "facts_missed_count": accuracy["facts_missed_count"],
-            "facts_found": str(accuracy["facts_found"]),
-            "facts_missed": str(accuracy["facts_missed"]),
-            "harmful_count": accuracy["harmful_count"],
-            "harmful_mentions": str(accuracy["harmful_mentions"]),
-            "should_refuse": refusal["should_refuse"],
-            "did_refuse": refusal["did_refuse"],
-            "refusal_appropriate": refusal["refusal_appropriate"],
-            "is_off_topic_test": refusal["is_off_topic_test"],
-            "is_privacy_test": refusal.get("is_privacy_test", False),
-            "safety_check": safety.get("safety_check"),
-            "violation_count": safety.get("violation_count", 0),
-            "safety_violations": str(safety.get("safety_violations", [])),
-            "clinical_reasoning_score": reasoning.get("clinical_reasoning_score"),
-            "has_reasoning": reasoning.get("has_reasoning"),
-            "mentions_factors": reasoning.get("mentions_factors"),
-            "has_citation": citation["has_citation"],
-            "citation_quality": citation["citation_quality"],
-            "test_type": _classify_test_type(test),
-            "requires_specific_value": test.get("requires_specific_value", False),
-            "safety_critical": test.get("safety_critical", False),
-            "is_memory_test": test.get("is_memory_test", False),
-            "run_timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-        }
-
+        # Run test with timeout
+        result = run_single_test_with_timeout(test, idx, len(df))
         results_list.append(result)
 
+        # Mark as done in Excel
         df.at[idx, "run_status"] = "Done"
         df.at[idx, "last_run_timestamp"] = result["run_timestamp"]
 
-        print("STATISTICS OF RUN:")
-        print(f"   Setup: {t1_t0:.2f}s")
-        print(f"   Memory load: {t2_t1:.2f}s")
-        print(f"   Invoke: {t3_t2:.2f}s")
-        print(f"   Total Wall Time: {response_time:.2f}s")
+        # Save checkpoint after each test
+        df.to_excel(excel_path, index=False)
 
-        # Free up main thread memory
-        del assistant_text, graph_response
-        gc.collect()
+        # Also save results incrementally
+        if os.path.exists(PERSISTENT_CSV):
+            existing_df = pd.read_csv(PERSISTENT_CSV)
+            new_row_df = pd.DataFrame([result])
+            combined_df = pd.concat([existing_df, new_row_df], ignore_index=True)
+            combined_df.to_csv(PERSISTENT_CSV, index=False)
+        else:
+            pd.DataFrame([result]).to_csv(PERSISTENT_CSV, index=False)
 
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-        print(
-            f"   Memory after cleanup: {process.memory_info().rss / 1024**2:.2f} MB\n"
-        )
-
+        # Periodic deep cleanup every 5 tests
         if (idx + 1) % 5 == 0:
-            df.to_excel(excel_path, index=False)
-            print("🔄 Checkpoint saved to Excel.")
+            print(f"\n🔄 Performing periodic deep cleanup after {idx + 1} tests...")
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            time.sleep(2)  # Brief pause to let system stabilize
 
-    df.to_excel(excel_path, index=False)
-    print(f"\n✅ Final Excel saved: {excel_path}")
+    print(f"\n{'=' * 70}")
+    print("✅ EVALUATION COMPLETE")
+    print(f"{'=' * 70}")
+    print(f"Total tests run: {len(results_list)}")
+    print(f"Results saved to: {PERSISTENT_CSV}")
+    print(f"Excel updated: {excel_path}\n")
 
-    if os.path.exists(PERSISTENT_CSV):
-        existing_df = pd.read_csv(PERSISTENT_CSV)
-        new_df = pd.DataFrame(results_list)
-        pd.concat([existing_df, new_df], ignore_index=True).to_csv(
-            PERSISTENT_CSV, index=False
-        )
-    else:
-        pd.DataFrame(results_list).to_csv(PERSISTENT_CSV, index=False)
-
-    print(f"✅ Results appended to CSV: {PERSISTENT_CSV}")
     return results_list
 
 
 if __name__ == "__main__":
-    # REQUIRED FOR WINDOWS MULTIPROCESSING
-    multiprocessing.freeze_support()
+    # Required for Windows multiprocessing
+    set_start_method("spawn", force=True)
+
+    # Suppress Streamlit output
+    suppress_streamlit_output()
+
+    # Run evaluation
     run_comprehensive_evaluation_from_excel()
