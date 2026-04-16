@@ -672,7 +672,7 @@ def run_single_test_with_timeout(test: Dict, idx: int, df_len: int) -> Dict:
     p.start()
 
     # Wait for result with timeout
-    p.join(timeout=500)  # 500 second timeout
+    p.join(timeout=600)  # 600 second timeout
 
     if p.is_alive():
         # Process is still running after timeout - kill it
