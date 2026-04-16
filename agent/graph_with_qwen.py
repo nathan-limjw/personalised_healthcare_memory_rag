@@ -5,7 +5,7 @@ import re
 import sqlite3
 from typing import Literal
 
-import streamlit as st
+# import streamlit as st  # Removed to avoid import warnings in evaluation
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_ollama import ChatOllama
 from langgraph.checkpoint.sqlite import SqliteSaver
@@ -291,7 +291,12 @@ def non_medical_node(state: AgentState):
     role = user_profile.get("role", "healthcare professional")
 
     # Get the memory retrieval function based on framework
-    framework = st.session_state.get("framework", "langmem").lower()
+    framework = os.environ.get("FRAMEWORK")
+    if framework is None:
+        import streamlit as st
+
+        framework = st.session_state.get("framework", "langmem")
+    framework = framework.lower()
 
     if framework == "langmem":
         store = get_langmem_store()

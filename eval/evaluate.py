@@ -1,7 +1,9 @@
 import gc
-import logging
 import os
 import re
+
+# Mock streamlit BEFORE any other imports to prevent warnings
+import sys
 import time
 from multiprocessing import Process, Queue, set_start_method
 from typing import Dict, List
@@ -13,44 +15,72 @@ from langchain_core.messages import HumanMessage
 
 from agent import graph_with_qwen
 from agent.graph_with_qwen import build_graph
-from app import setup_memory
 from config import EXCEL_PATH, PERSISTENT_CSV, RAG_INDEX_DIR, USERS
+from memory.langmem_intelligence import intelligent_persist
+from memory.langmem_memory import (
+    get_langmem_store,
+)
+from memory.langmem_memory import (
+    search_memory as langmem_search,
+)
+from memory.mem0_memory import add_memory as mem0_add
+from memory.mem0_memory import get_mem0
+from memory.mem0_memory import search_memory as mem0_search
 from rag.loader import chunk_documents, load_pdfs
 from rag.vectorstore import build_index, load_index
 
+
+class MockStreamlit:
+    class session_state:
+        @staticmethod
+        def get(key, default):
+            return os.environ.get("FRAMEWORK", default)
+
+
+sys.modules["streamlit"] = MockStreamlit
 # ══════════════════════════════════════════════════════════════
-# SUPPRESS STREAMLIT WARNINGS AND ERRORS
+# LOCAL SETUP_MEMORY FOR EVALUATION (NO STREAMLIT)
 # ══════════════════════════════════════════════════════════════
 
 
-def suppress_streamlit_output():
-    """Suppress Streamlit's annoying terminal output."""
+def setup_memory(framework: str, user_key: str):
+    """
+    Setup memory backend for evaluation (no streamlit session state).
+    Returns retrieve and persist functions.
+    """
+    framework = framework.lower()
 
-    # Suppress Streamlit logs
-    logging.getLogger("streamlit").setLevel(logging.ERROR)
-    logging.getLogger("streamlit.runtime").setLevel(logging.ERROR)
-    logging.getLogger("streamlit.watcher").setLevel(logging.ERROR)
-    logging.getLogger("streamlit.server").setLevel(logging.ERROR)
+    if framework == "mem0":
+        mem = get_mem0(user_key)
 
-    # Redirect Streamlit stderr/stdout
-    try:
-        import streamlit as st
+        def retrieve(query: str, user_id: str):
+            return mem0_search(mem, query, user_id)
 
-        # Disable Streamlit's logger
-        st.logger.get_logger = lambda name: logging.getLogger(name)
-    except ImportError:
-        pass  # Streamlit not installed, no problem
+        def persist(user_msg: str, assistant_msg: str, user_id: str):
+            mem0_add(
+                mem,
+                [
+                    {"role": "user", "content": user_msg},
+                    {"role": "assistant", "content": assistant_msg},
+                ],
+                user_id,
+            )
 
-    # Also suppress warnings
-    import warnings
+        return retrieve, persist
 
-    warnings.filterwarnings("ignore", category=UserWarning)
-    warnings.filterwarnings("ignore", category=FutureWarning)
-    warnings.filterwarnings("ignore", category=DeprecationWarning)
+    elif framework == "langmem":
+        store = get_langmem_store()
 
+        def retrieve(query: str, user_id: str):
+            return langmem_search(store, query, user_id)
 
-# Call this at the very start
-suppress_streamlit_output()
+        def persist(user_msg: str, assistant_msg: str, user_id: str):
+            intelligent_persist(store, user_msg, assistant_msg, user_id)
+
+        return retrieve, persist
+
+    else:
+        raise ValueError(f"Unknown framework: {framework}")
 
 
 # ══════════════════════════════════════════════════════════════
@@ -552,8 +582,6 @@ def _run_test_in_process(test: Dict, idx: int, result_queue: Queue):
     Worker function that runs in a separate process.
     This allows true timeout and isolation on Windows.
     """
-    # Suppress Streamlit in child process too
-    suppress_streamlit_output()
 
     try:
         # Load RAG index in this process
@@ -565,6 +593,7 @@ def _run_test_in_process(test: Dict, idx: int, result_queue: Queue):
 
         # Setup memory
         retrieve_fn, persist_fn = setup_memory(test["framework"], test["user"])
+        os.environ["FRAMEWORK"] = test["framework"]
         graph = build_graph(retrieve_fn, persist_fn)
 
         # Load memory if needed
@@ -843,9 +872,6 @@ def run_comprehensive_evaluation_from_excel(excel_path=EXCEL_PATH):
 if __name__ == "__main__":
     # Required for Windows multiprocessing
     set_start_method("spawn", force=True)
-
-    # Suppress Streamlit output
-    suppress_streamlit_output()
 
     # Run evaluation
     run_comprehensive_evaluation_from_excel()
